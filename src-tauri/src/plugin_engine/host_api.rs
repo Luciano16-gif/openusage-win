@@ -1258,7 +1258,9 @@ fn ls_command_matches(command: &str, process_name: &str, markers: &[String]) -> 
         return false;
     }
 
-    let ide_name = ls_extract_flag(command, "--ide_name").map(|v| v.to_lowercase());
+    let ide_name = ls_extract_flag(command, "--ide_name")
+        .or_else(|| ls_extract_flag(command, "--override_ide_name"))
+        .map(|v| v.to_lowercase());
     let app_data = ls_extract_flag(command, "--app_data_dir").map(|v| v.to_lowercase());
 
     markers.iter().any(|marker| {
@@ -4305,6 +4307,21 @@ Saved lockfile
         assert!(!ls_command_matches(
             command,
             "language_server_macos",
+            &["windsurf".to_string()]
+        ));
+    }
+
+    #[test]
+    fn ls_command_matches_antigravity_2_override_ide_name() {
+        let command = r#"C:\Users\me\AppData\Local\Programs\Antigravity\resources\bin\language_server.exe --standalone --override_ide_name antigravity --override_ide_version 2.0.1 --csrf_token abc --https_server_port 0"#;
+        assert!(ls_command_matches(
+            command,
+            "language_server",
+            &["antigravity".to_string()]
+        ));
+        assert!(!ls_command_matches(
+            command,
+            "language_server",
             &["windsurf".to_string()]
         ));
     }
