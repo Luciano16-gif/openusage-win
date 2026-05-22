@@ -202,9 +202,7 @@
 
   function discoverLs(ctx) {
     return ctx.host.ls.discover({
-      processName: isWindows(ctx)
-        ? "language_server_windows_x64"
-        : "language_server_macos",
+      processName: "language_server",
       markers: ["antigravity"],
       csrfFlag: "--csrf_token",
       portFlag: "--extension_server_port",

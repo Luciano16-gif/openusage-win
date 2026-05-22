@@ -527,6 +527,22 @@ describe("antigravity plugin", () => {
     expect(capturedBody).toEqual({})
   })
 
+  it("discovers Antigravity 2.0 language server by generic process name", async () => {
+    const ctx = makeCtx()
+    ctx.app.platform = "windows"
+    setupLsMock(ctx, makeDiscovery(), makeUserStatusResponse())
+
+    const plugin = await loadPlugin()
+    plugin.probe(ctx)
+
+    expect(ctx.host.ls.discover).toHaveBeenCalledWith(
+      expect.objectContaining({
+        processName: "language_server",
+        markers: ["antigravity"],
+      })
+    )
+  })
+
   it("falls back to Cloud Code API when LS is not available", async () => {
     const ctx = makeCtx()
     const futureExpiry = Math.floor(Date.now() / 1000) + 3600
