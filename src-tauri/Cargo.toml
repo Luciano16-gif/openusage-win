@@ -1,6 +1,6 @@
 [package]
 name = "openusage"
-version = "0.6.24"
+version = "0.6.25"
 description = "OpenUsage is an open source AI subscription limit tracker"
 authors = ["Robin Ebers"]
 edition = "2024"
@@ -27,12 +27,13 @@ dirs = "6"
 log = "0.4"
 libc = "0.2"
 reqwest = { version = "0.13", features = ["blocking", "socks"] }
-rquickjs = { version = "0.11", features = ["bindgen"] }
+rquickjs = { version = "0.12", features = ["bindgen"] }
 tauri-plugin-store = "2.4.3"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 tauri-plugin-log = "2"
 tauri-plugin-aptabase = { git = "https://github.com/aptabase/tauri-plugin-aptabase", rev = "e896cceb" }
+tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-global-shortcut = "2"

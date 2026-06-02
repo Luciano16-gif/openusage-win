@@ -1,9 +1,9 @@
 use aes_gcm::{
-    aead::{generic_array::typenum::U16, rand_core::RngCore, Aead, KeyInit, OsRng},
-    aes::Aes256,
     AesGcm, Nonce,
+    aead::{Aead, KeyInit, OsRng, generic_array::typenum::U16, rand_core::RngCore},
+    aes::Aes256,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rquickjs::{Ctx, Exception, Function, Object};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -1330,29 +1330,44 @@ struct LsProcess {
     command: String,
 }
 
-fn ls_command_matches(command: &str, process_name: &str, markers: &[String]) -> bool {
-    let command_lower = command.to_lowercase();
-    if !command_lower.contains(&process_name.to_lowercase()) {
-        return false;
+fn ls_best_process(candidates: Vec<(i32, String)>, opts: &LsDiscoverOpts) -> Option<LsProcess> {
+    let process_name_lower = opts.process_name.trim().to_lowercase();
+    let markers_lower: Vec<String> = opts
+        .markers
+        .iter()
+        .map(|marker| marker.trim().to_lowercase())
+        .filter(|marker| !marker.is_empty())
+        .collect();
+    let mut matches: Vec<(u8, i32, String)> = Vec::new();
+
+    for (pid, command) in candidates {
+        if !ls_command_matches_process(&command, &process_name_lower) {
+            continue;
+        }
+        let Some(marker_rank) = ls_marker_rank(&command, &markers_lower) else {
+            continue;
+        };
+        matches.push((marker_rank, pid, command));
     }
 
-    let ide_name = ls_extract_flag(command, "--ide_name")
-        .or_else(|| ls_extract_flag(command, "--override_ide_name"))
-        .map(|v| v.to_lowercase());
-    let app_data = ls_extract_flag(command, "--app_data_dir").map(|v| v.to_lowercase());
+    matches.sort_by_key(|(marker_rank, _, _)| *marker_rank);
+    matches
+        .into_iter()
+        .next()
+        .map(|(_, pid, command)| LsProcess { pid, command })
+}
 
-    markers.iter().any(|marker| {
-        let marker = marker.to_lowercase();
-        if let Some(ref name) = ide_name {
-            return *name == marker;
-        }
-        if let Some(ref dir) = app_data {
-            return *dir == marker;
-        }
+#[cfg(test)]
+fn ls_command_matches(command: &str, process_name: &str, markers: &[String]) -> bool {
+    let process_name_lower = process_name.trim().to_lowercase();
+    let markers_lower: Vec<String> = markers
+        .iter()
+        .map(|marker| marker.trim().to_lowercase())
+        .filter(|marker| !marker.is_empty())
+        .collect();
 
-        command_lower.contains(&format!("/{}/", marker))
-            || command_lower.contains(&format!("\\{}\\", marker))
-    })
+    ls_command_matches_process(command, &process_name_lower)
+        && ls_marker_rank(command, &markers_lower).is_some()
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1374,6 +1389,7 @@ fn ls_find_process(opts: &LsDiscoverOpts, plugin_id: &str) -> Option<LsProcess> 
     }
 
     let ps_stdout = String::from_utf8_lossy(&ps_output.stdout);
+    let mut candidates = Vec::new();
     for line in ps_stdout.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -1384,19 +1400,12 @@ fn ls_find_process(opts: &LsDiscoverOpts, plugin_id: &str) -> Option<LsProcess> 
         let pid_str = parts.next()?.trim();
         let command = parts.next()?.trim();
 
-        if !ls_command_matches(command, &opts.process_name, &opts.markers) {
-            continue;
-        }
-
         if let Ok(pid) = pid_str.parse::<i32>() {
-            return Some(LsProcess {
-                pid,
-                command: command.to_string(),
-            });
+            candidates.push((pid, command.to_string()));
         }
     }
 
-    None
+    ls_best_process(candidates, opts)
 }
 
 #[cfg(target_os = "windows")]
@@ -1470,6 +1479,7 @@ Get-CimInstance Win32_Process |
         _ => Vec::new(),
     };
 
+    let mut candidates = Vec::new();
     for row in rows {
         let Some(pid) = row.get("ProcessId").and_then(|value| value.as_i64()) else {
             continue;
@@ -1477,16 +1487,10 @@ Get-CimInstance Win32_Process |
         let Some(command) = row.get("CommandLine").and_then(|value| value.as_str()) else {
             continue;
         };
-        if !ls_command_matches(command, &opts.process_name, &opts.markers) {
-            continue;
-        }
-        return Some(LsProcess {
-            pid: pid as i32,
-            command: command.to_string(),
-        });
+        candidates.push((pid as i32, command.to_string()));
     }
 
-    None
+    ls_best_process(candidates, opts)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1612,12 +1616,15 @@ fn inject_ls<'js>(ctx: &Ctx<'js>, host: &Object<'js>, plugin_id: &str) -> rquick
                     }
                 };
 
-                // Extract CSRF token
-                let csrf = match ls_extract_flag(&process.command, &opts.csrf_flag) {
-                    Some(c) => c,
-                    None => {
-                        log::warn!("[plugin:{}] CSRF token not found in process args", pid);
-                        return Ok("null".to_string());
+                let csrf = if opts.csrf_flag.trim().is_empty() {
+                    String::new()
+                } else {
+                    match ls_extract_flag(&process.command, &opts.csrf_flag) {
+                        Some(c) => c,
+                        None => {
+                            log::warn!("[plugin:{}] CSRF token not found in process args", pid);
+                            return Ok("null".to_string());
+                        }
                     }
                 };
 
@@ -1708,6 +1715,75 @@ fn ls_extract_flag(command: &str, flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn ls_marker_rank(command: &str, markers_lower: &[String]) -> Option<u8> {
+    if markers_lower.is_empty() {
+        return Some(0);
+    }
+
+    let ide_name = ls_extract_flag(command, "--ide_name")
+        .or_else(|| ls_extract_flag(command, "--override_ide_name"))
+        .map(|value| value.to_lowercase());
+    let app_data = ls_extract_flag(command, "--app_data_dir").map(|value| value.to_lowercase());
+    if ide_name.is_some() || app_data.is_some() {
+        return markers_lower
+            .iter()
+            .any(|marker| {
+                ide_name.as_ref().is_some_and(|name| name == marker)
+                    || app_data.as_ref().is_some_and(|dir| dir == marker)
+            })
+            .then_some(0);
+    }
+
+    let command_lower = command.to_lowercase();
+    markers_lower
+        .iter()
+        .any(|marker| {
+            command_lower.contains(&format!("/{}/", marker))
+                || command_lower.contains(&format!("\\{}\\", marker))
+        })
+        .then_some(1)
+}
+
+fn ls_argv0(command: &str) -> &str {
+    let trimmed = command.trim_start();
+    let Some(quote) = trimmed.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+        return trimmed.split_whitespace().next().unwrap_or_default();
+    };
+
+    let quote_len = quote.len_utf8();
+    let rest = &trimmed[quote_len..];
+    match rest.find(quote) {
+        Some(end) => &rest[..end],
+        None => trimmed.split_whitespace().next().unwrap_or_default(),
+    }
+}
+
+fn ls_command_matches_process(command: &str, process_name_lower: &str) -> bool {
+    if process_name_lower.is_empty() {
+        return false;
+    }
+
+    let argv0 = ls_argv0(command).replace('\\', "/").to_lowercase();
+    let exe_name = argv0.rsplit('/').next().unwrap_or_default();
+    let exe_name = exe_name.strip_suffix(".exe").unwrap_or(exe_name);
+
+    if exe_name == process_name_lower || exe_name.starts_with(&format!("{}_", process_name_lower)) {
+        return true;
+    }
+
+    let command_lower = command.to_lowercase();
+    if process_name_lower.len() >= 8 {
+        command_lower.contains(process_name_lower)
+    } else {
+        command_lower.ends_with(&format!("/{}", process_name_lower))
+            || command_lower.ends_with(&format!("\\{}", process_name_lower))
+            || command_lower.contains(&format!("/{} ", process_name_lower))
+            || command_lower.contains(&format!("\\{} ", process_name_lower))
+            || command_lower.contains(&format!("/{}\t", process_name_lower))
+            || command_lower.contains(&format!("\\{}\t", process_name_lower))
+    }
 }
 
 /// Parse listening port numbers from `lsof -nP -iTCP -sTCP:LISTEN` output.
@@ -2269,7 +2345,7 @@ fn format_ccusage_timeout(timeout: std::time::Duration) -> String {
     format!("{:.3}s", timeout.as_secs_f64())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn run_ccusage_with_runner(
     kind: CcusageRunnerKind,
     program: &str,
@@ -2606,9 +2682,13 @@ fn inject_keychain<'js>(
         "readGenericPassword",
         Function::new(
             ctx.clone(),
-            move |ctx_inner: Ctx<'_>, service: String| -> rquickjs::Result<String> {
+            move |ctx_inner: Ctx<'_>,
+                  service: String,
+                  account: Option<String>|
+                  -> rquickjs::Result<String> {
                 if !cfg!(target_os = "macos") {
                     if cfg!(target_os = "windows")
+                        && account.is_none()
                         && windows_gh_cli_keychain_service(&pid_read, &service)
                     {
                         log::info!(
@@ -2626,9 +2706,32 @@ fn inject_keychain<'js>(
                         "keychain API is only supported on macOS",
                     ));
                 }
-                log::info!("[plugin:{}] keychain read: service={}", pid_read, service);
+                let account = account.and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                });
+                let redacted_account = account.as_ref().map(|value| redact_value(value));
+                if let Some(ref redacted) = redacted_account {
+                    log::info!(
+                        "[plugin:{}] keychain read: service={}, account={}",
+                        pid_read,
+                        service,
+                        redacted
+                    );
+                } else {
+                    log::info!("[plugin:{}] keychain read: service={}", pid_read, service);
+                }
+                let args = if let Some(ref account) = account {
+                    keychain_find_generic_password_args_for_account(&service, account)
+                } else {
+                    keychain_find_generic_password_args(&service)
+                };
                 let output = hidden_command("security")
-                    .args(keychain_find_generic_password_args(&service))
+                    .args(args)
                     .output()
                     .map_err(|e| {
                         Exception::throw_message(
@@ -2640,23 +2743,42 @@ fn inject_keychain<'js>(
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     let first_line = stderr.lines().next().unwrap_or("").trim();
-                    log::warn!(
-                        "[plugin:{}] keychain read miss: service={}, error={}",
-                        pid_read,
-                        service,
-                        first_line
-                    );
+                    if let Some(ref redacted) = redacted_account {
+                        log::warn!(
+                            "[plugin:{}] keychain read miss: service={}, account={}, error={}",
+                            pid_read,
+                            service,
+                            redacted,
+                            first_line
+                        );
+                    } else {
+                        log::warn!(
+                            "[plugin:{}] keychain read miss: service={}, error={}",
+                            pid_read,
+                            service,
+                            first_line
+                        );
+                    }
                     return Err(Exception::throw_message(
                         &ctx_inner,
                         &format!("keychain item not found: {}", first_line),
                     ));
                 }
 
-                log::info!(
-                    "[plugin:{}] keychain read hit: service={}",
-                    pid_read,
-                    service
-                );
+                if let Some(ref redacted) = redacted_account {
+                    log::info!(
+                        "[plugin:{}] keychain read hit: service={}, account={}",
+                        pid_read,
+                        service,
+                        redacted
+                    );
+                } else {
+                    log::info!(
+                        "[plugin:{}] keychain read hit: service={}",
+                        pid_read,
+                        service
+                    );
+                }
                 Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
             },
         )?,
