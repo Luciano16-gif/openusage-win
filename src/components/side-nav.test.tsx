@@ -118,7 +118,7 @@ describe("SideNav", () => {
     expect(onDragRegionMouseDown).toHaveBeenCalledTimes(1)
   })
 
-  it("calls the drag handler once from the sidebar spacer", () => {
+  it("keeps plugin list as the only flexible sidebar section", () => {
     const onViewChange = vi.fn()
     const onDragRegionMouseDown = vi.fn()
     const { container } = render(
@@ -131,13 +131,44 @@ describe("SideNav", () => {
     )
 
     const nav = container.querySelector("nav")
-    const spacer = Array.from(nav?.children ?? []).find((child) =>
+    const flexibleSections = Array.from(nav?.children ?? []).filter((child) =>
       child.classList.contains("flex-1")
     )
-    expect(spacer).toBeDefined()
+    expect(flexibleSections).toHaveLength(1)
+    expect(flexibleSections[0]).toHaveClass("overflow-y-auto")
+    expect(onDragRegionMouseDown).not.toHaveBeenCalled()
+  })
 
-    fireEvent.mouseDown(spacer!)
+  it("keeps Windows drag-region layout matching the mac sidebar structure", () => {
+    const onViewChange = vi.fn()
+    const { container } = render(
+      <div style={{ height: "220px" }}>
+        <SideNav
+          activeView="antigravity"
+          onViewChange={onViewChange}
+          plugins={[
+            { id: "codex", name: "Codex", iconUrl: "codex.svg" },
+            { id: "antigravity", name: "Antigravity", iconUrl: "antigravity.svg" },
+            { id: "copilot", name: "Copilot", iconUrl: "copilot.svg" },
+            { id: "cursor", name: "Cursor", iconUrl: "cursor.svg" },
+          ]}
+          onDragRegionMouseDown={vi.fn()}
+        />
+      </div>
+    )
 
-    expect(onDragRegionMouseDown).toHaveBeenCalledTimes(1)
+    const nav = container.querySelector("nav")
+    expect(nav).not.toBeNull()
+
+    const directFlexChildren = Array.from(nav!.children).filter((child) =>
+      child.classList.contains("flex-1")
+    )
+    expect(directFlexChildren).toHaveLength(1)
+
+    const pluginList = directFlexChildren[0]
+    expect(pluginList).toHaveClass("min-h-0", "overflow-y-auto")
+    expect(pluginList.querySelectorAll("button")).toHaveLength(4)
+    expect(screen.getByRole("button", { name: "Help" }).parentElement).toBe(nav)
+    expect(screen.getByRole("button", { name: "Settings" }).parentElement).toBe(nav)
   })
 })

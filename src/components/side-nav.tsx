@@ -271,11 +271,6 @@ export function SideNav({
         </DndContext>
       </div>
 
-      {/* Spacer */}
-      <div
-        className={cn("flex-1", onDragRegionMouseDown && "cursor-grab active:cursor-grabbing")}
-      />
-
       {/* Help */}
       <NavButton
         isActive={false}
