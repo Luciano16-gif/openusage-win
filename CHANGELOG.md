@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.6.27
+
+### Bug Fixes
+- Support Devin auth from the Devin - Next app ([#554](https://github.com/robinebers/openusage/pull/554)) by @validatedev
+- Clamp panel to visible screen when menu bar auto-hides ([#557](https://github.com/robinebers/openusage/pull/557)) by @westline-marketing
+- Allow keychain reads without account ([#559](https://github.com/robinebers/openusage/pull/559)) by @rohithgoud30
+
+### Chores
+- Remove retired Windsurf plugin on startup ([#552](https://github.com/robinebers/openusage/pull/552)) by @robinebers
+- Bump log from 0.4.30 to 0.4.32 in /src-tauri ([#564](https://github.com/robinebers/openusage/pull/564)) by @dependabot
+- Bump serial_test from 3.4.0 to 3.5.0 in /src-tauri ([#563](https://github.com/robinebers/openusage/pull/563)) by @dependabot
+
+---
+
+### Changelog
+
+**Full Changelog**: [v0.6.26...v0.6.27](https://github.com/robinebers/openusage/compare/v0.6.26...v0.6.27)
+
+- [cad8468](https://github.com/robinebers/openusage/commit/cad846874d54eefe9c689274d514a6ce7613e7c1) Remove retired Windsurf plugin on startup by @robinebers
+- [16bb1e1](https://github.com/robinebers/openusage/commit/16bb1e19ce777199ee5e82ce4e14b9eaaa50186f) fix: support Devin auth from the Devin - Next app by @validatedev
+- [aa424a4](https://github.com/robinebers/openusage/commit/aa424a4cf2e82771f76b8edcce52a2ad50ac79c5) fix(panel): clamp panel to visible screen when menu bar auto-hides by @westline-marketing
+- [d25321a](https://github.com/robinebers/openusage/commit/d25321a958d3e04f25b8093c11495684973dcdb0) fix: allow keychain reads without account by @rohithgoud30
+- [534da86](https://github.com/robinebers/openusage/commit/534da86afef1b4bda36330cf0ffd992326afcf75) chore(deps): bump log from 0.4.30 to 0.4.32 in /src-tauri by @dependabot
+- [848ec86](https://github.com/robinebers/openusage/commit/848ec8674c5255125c2dfe483a22d2de9b4afa84) chore(deps): bump serial_test from 3.4.0 to 3.5.0 in /src-tauri by @dependabot
+
 ## v0.6.26
 
 ### New Features
@@ -693,6 +718,27 @@
 
 - [824e3da](https://github.com/robinebers/openusage/commit/824e3da) fix(plugin-engine): read whitelisted env vars from terminal zsh (#167) by @robinebers
 - [ffb8883](https://github.com/robinebers/openusage/commit/ffb8883) feat(analytics): implement Tauri runtime check for event tracking by @robinebers
+
+## v0.6.1
+
+### New Features
+- Add Z.ai (Zhipu AI) provider plugin — tracks GLM Coding session usage (%) and web search quotas ([#135](https://github.com/robinebers/openusage/pull/135)) by @pbuchman
+- Add start-on-login setting with OS autostart integration ([#161](https://github.com/robinebers/openusage/pull/161)) by @davidarny
+- Add optional plugin links and quick actions on provider cards ([#162](https://github.com/robinebers/openusage/pull/162)) by @davidarny
+
+### Bug Fixes
+- Factory plugin: support Droid encrypted file and macOS keychain auth fallback ([#159](https://github.com/robinebers/openusage/pull/159)) by @davidarny
+
+---
+
+### Changelog
+
+**Full Changelog**: [v0.6.0...v0.6.1](https://github.com/robinebers/openusage/compare/v0.6.0...v0.6.1)
+
+- [0ec23d7](https://github.com/robinebers/openusage/commit/0ec23d7) feat(zai): add Z.ai provider plugin (#135) by @pbuchman
+- [31e8b35](https://github.com/robinebers/openusage/commit/31e8b35) feat(settings): add start-on-login setting (#161) by @davidarny
+- [96aee9b](https://github.com/robinebers/openusage/commit/96aee9b) feat: add optional plugin links and quick actions (#162) by @davidarny
+- [3f7f914](https://github.com/robinebers/openusage/commit/3f7f914) fix(factory): support droid encrypted and keychain auth (#159) by @davidarny
 
 ## 0.6.0
 

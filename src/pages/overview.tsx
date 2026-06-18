@@ -1,4 +1,5 @@
 import { ProviderCard } from "@/components/provider-card"
+import { RetirementNotice } from "@/components/retirement-notice"
 import type { PluginDisplayState } from "@/lib/plugin-types"
 import type { DisplayMode, ResetTimerDisplayMode, TimeFormatMode } from "@/lib/settings"
 
@@ -19,36 +20,35 @@ export function OverviewPage({
   timeFormatMode = "auto",
   onResetTimerDisplayModeToggle,
 }: OverviewPageProps) {
-  if (plugins.length === 0) {
-    return (
-      <div className="text-center text-muted-foreground py-8">
-        No providers enabled
-      </div>
-    )
-  }
-
   return (
     <div>
-      {plugins.map((plugin, index) => (
-        <ProviderCard
-          key={plugin.meta.id}
-          name={plugin.meta.name}
-          plan={plugin.data?.plan}
-          showSeparator={index < plugins.length - 1}
-          loading={plugin.loading}
-          error={plugin.error}
-          lines={plugin.data?.lines ?? []}
-          skeletonLines={plugin.meta.lines}
-          lastManualRefreshAt={plugin.lastManualRefreshAt}
-          lastUpdatedAt={plugin.lastUpdatedAt}
-          onRetry={onRetryPlugin ? () => onRetryPlugin(plugin.meta.id) : undefined}
-          scopeFilter="overview"
-          displayMode={displayMode}
-          resetTimerDisplayMode={resetTimerDisplayMode}
-          timeFormatMode={timeFormatMode}
-          onResetTimerDisplayModeToggle={onResetTimerDisplayModeToggle}
-        />
-      ))}
+      <RetirementNotice />
+      {plugins.length === 0 ? (
+        <div className="text-center text-muted-foreground py-8">
+          No providers enabled
+        </div>
+      ) : (
+        plugins.map((plugin, index) => (
+          <ProviderCard
+            key={plugin.meta.id}
+            name={plugin.meta.name}
+            plan={plugin.data?.plan}
+            showSeparator={index < plugins.length - 1}
+            loading={plugin.loading}
+            error={plugin.error}
+            lines={plugin.data?.lines ?? []}
+            skeletonLines={plugin.meta.lines}
+            lastManualRefreshAt={plugin.lastManualRefreshAt}
+            lastUpdatedAt={plugin.lastUpdatedAt}
+            onRetry={onRetryPlugin ? () => onRetryPlugin(plugin.meta.id) : undefined}
+            scopeFilter="overview"
+            displayMode={displayMode}
+            resetTimerDisplayMode={resetTimerDisplayMode}
+            timeFormatMode={timeFormatMode}
+            onResetTimerDisplayModeToggle={onResetTimerDisplayModeToggle}
+          />
+        ))
+      )}
     </div>
   )
 }

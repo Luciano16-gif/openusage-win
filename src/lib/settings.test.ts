@@ -4,6 +4,7 @@ import {
   DEFAULT_DISPLAY_MODE,
   DEFAULT_GLOBAL_SHORTCUT,
   DEFAULT_MENUBAR_ICON_STYLE,
+  DEFAULT_MENUBAR_METRIC,
   DEFAULT_PLUGIN_SETTINGS,
   DEFAULT_RESET_TIMER_DISPLAY_MODE,
   DEFAULT_START_ON_LOGIN,
@@ -15,10 +16,15 @@ import {
   loadDisplayMode,
   loadGlobalShortcut,
   loadMenubarIconStyle,
+  loadMenubarMetric,
   loadPluginSettings,
   loadResetTimerDisplayMode,
+  loadRetirementNoticeDismissedAt,
   loadStartOnLogin,
   loadTimeFormatMode,
+  RETIREMENT_NOTICE_INTERVAL_MS,
+  saveRetirementNoticeDismissedAt,
+  shouldShowRetirementNotice,
   migrateLegacyTraySettings,
   migrateWindsurfToDevin,
   loadThemeMode,
@@ -27,6 +33,7 @@ import {
   saveDisplayMode,
   saveGlobalShortcut,
   saveMenubarIconStyle,
+  saveMenubarMetric,
   savePluginSettings,
   saveResetTimerDisplayMode,
   saveStartOnLogin,
@@ -332,6 +339,25 @@ describe("settings", () => {
     await expect(loadMenubarIconStyle()).resolves.toBe(DEFAULT_MENUBAR_ICON_STYLE)
   })
 
+  it("loads default menubar metric when missing", async () => {
+    await expect(loadMenubarMetric()).resolves.toBe(DEFAULT_MENUBAR_METRIC)
+  })
+
+  it("loads stored menubar metric", async () => {
+    storeState.set("menubarMetric", "weekly")
+    await expect(loadMenubarMetric()).resolves.toBe("weekly")
+  })
+
+  it("saves menubar metric", async () => {
+    await saveMenubarMetric("weekly")
+    await expect(loadMenubarMetric()).resolves.toBe("weekly")
+  })
+
+  it("falls back to default for invalid menubar metric", async () => {
+    storeState.set("menubarMetric", "invalid")
+    await expect(loadMenubarMetric()).resolves.toBe(DEFAULT_MENUBAR_METRIC)
+  })
+
   it("skips legacy tray migration when keys are absent", async () => {
     await expect(migrateLegacyTraySettings()).resolves.toBeUndefined()
     expect(storeState.has("trayIconStyle")).toBe(false)
@@ -409,5 +435,45 @@ describe("settings", () => {
   it("falls back to default for invalid start on login value", async () => {
     storeState.set("startOnLogin", "invalid")
     await expect(loadStartOnLogin()).resolves.toBe(DEFAULT_START_ON_LOGIN)
+  })
+
+  it("loads null retirement notice dismissal when missing", async () => {
+    await expect(loadRetirementNoticeDismissedAt()).resolves.toBeNull()
+  })
+
+  it("ignores invalid retirement notice dismissal value", async () => {
+    storeState.set("retirementNoticeDismissedAt", "nope")
+    await expect(loadRetirementNoticeDismissedAt()).resolves.toBeNull()
+  })
+
+  it("saves and loads retirement notice dismissal timestamp", async () => {
+    await saveRetirementNoticeDismissedAt(1234)
+    await expect(loadRetirementNoticeDismissedAt()).resolves.toBe(1234)
+  })
+
+  it("shows retirement notice when never dismissed", () => {
+    expect(shouldShowRetirementNotice(null, Date.now())).toBe(true)
+  })
+
+  it("hides retirement notice within the interval", () => {
+    const now = Date.now()
+    expect(shouldShowRetirementNotice(now - 1000, now)).toBe(false)
+  })
+
+  it("re-shows retirement notice after the interval elapses", () => {
+    const now = Date.now()
+    expect(
+      shouldShowRetirementNotice(now - RETIREMENT_NOTICE_INTERVAL_MS, now)
+    ).toBe(true)
+  })
+
+  it("shows retirement notice for a future dismissal timestamp", () => {
+    const now = Date.now()
+    expect(shouldShowRetirementNotice(now + 60_000, now)).toBe(true)
+  })
+
+  it("ignores a negative retirement notice dismissal value", async () => {
+    storeState.set("retirementNoticeDismissedAt", -5)
+    await expect(loadRetirementNoticeDismissedAt()).resolves.toBeNull()
   })
 })

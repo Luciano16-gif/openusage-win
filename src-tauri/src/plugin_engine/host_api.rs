@@ -4,7 +4,7 @@ use aes_gcm::{
     aes::Aes256,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use rquickjs::{Ctx, Exception, Function, Object};
+use rquickjs::{function::Rest, Ctx, Exception, Function, Object};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -2713,8 +2713,21 @@ fn inject_keychain<'js>(
             ctx.clone(),
             move |ctx_inner: Ctx<'_>,
                   service: String,
-                  account: Option<String>|
+                  account_args: Rest<Option<String>>|
                   -> rquickjs::Result<String> {
+                let account = account_args
+                    .0
+                    .into_iter()
+                    .next()
+                    .flatten()
+                    .and_then(|value| {
+                        let trimmed = value.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        }
+                    });
                 if !cfg!(target_os = "macos") {
                     if cfg!(target_os = "windows")
                         && account.is_none()
@@ -2735,14 +2748,6 @@ fn inject_keychain<'js>(
                         "keychain API is only supported on macOS",
                     ));
                 }
-                let account = account.and_then(|value| {
-                    let trimmed = value.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    }
-                });
                 let redacted_account = account.as_ref().map(|value| redact_value(value));
                 if let Some(ref redacted) = redacted_account {
                     log::info!(
@@ -3409,6 +3414,91 @@ mod tests {
                 .get("writeGenericPasswordForCurrentUser")
                 .expect("writeGenericPasswordForCurrentUser");
         });
+    }
+
+    #[test]
+    fn keychain_read_generic_password_accepts_optional_account_arg_from_js() {
+        let rt = Runtime::new().expect("runtime");
+        let ctx = Context::full(&rt).expect("context");
+        ctx.with(|ctx| {
+            let app_data = std::env::temp_dir();
+            inject_host_api(&ctx, "test", &app_data, "0.0.0").expect("inject host api");
+
+            let message: String = ctx
+                .eval(
+                    r#"
+                    try {
+                        __openusage_ctx.host.keychain.readGenericPassword("__openusage_missing_service__");
+                        "ok";
+                    } catch (e) {
+                        String(e);
+                    }
+                    "#,
+                )
+                .expect("js eval");
+
+            assert!(
+                !message.contains("2 where expected"),
+                "single-arg call should reach the keychain implementation, got: {}",
+                message
+            );
+        });
+    }
+
+    #[test]
+    fn ls_command_matches_language_server_variants() {
+        assert!(ls_command_matches_process(
+            "/Applications/Antigravity IDE.app/Contents/Resources/language_server_macos_arm --app_data_dir antigravity-ide",
+            "language_server"
+        ));
+        assert!(ls_command_matches_process(
+            "/tmp/language_server --app_data_dir antigravity-ide",
+            "language_server"
+        ));
+    }
+
+    #[test]
+    fn ls_command_matches_short_process_names_exactly() {
+        assert!(ls_command_matches_process(
+            "/opt/homebrew/bin/agy --some-flag",
+            "agy"
+        ));
+        assert!(ls_command_matches_process(
+            "/Applications/Antigravity IDE.app/Contents/Resources/agy --some-flag",
+            "agy"
+        ));
+        assert!(ls_command_matches_process(
+            "\"/Applications/Antigravity IDE.app/Contents/Resources/agy\" --some-flag",
+            "agy"
+        ));
+        assert!(!ls_command_matches_process(
+            "/opt/homebrew/bin/not-agy-helper --some-flag agy",
+            "agy"
+        ));
+    }
+
+    #[test]
+    fn ls_marker_rank_prefers_exact_flags_over_path_fallback() {
+        let markers = vec!["antigravity".to_string()];
+
+        assert_eq!(
+            ls_marker_rank(
+                "/tmp/windsurf/language_server --ide_name antigravity",
+                &markers
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            ls_marker_rank("/tmp/antigravity/language_server", &markers),
+            Some(1)
+        );
+        assert_eq!(
+            ls_marker_rank(
+                "/tmp/antigravity/language_server --ide_name windsurf",
+                &markers
+            ),
+            None
+        );
     }
 
     #[test]

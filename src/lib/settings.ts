@@ -22,6 +22,8 @@ export type TimeFormatMode = "auto" | "12h" | "24h";
 
 export type MenubarIconStyle = "provider" | "bars" | "donut";
 
+export type MenubarMetric = "default" | "weekly";
+
 export type GlobalShortcut = string | null;
 
 const SETTINGS_STORE_PATH = "settings.json";
@@ -32,10 +34,15 @@ const DISPLAY_MODE_KEY = "displayMode";
 const RESET_TIMER_DISPLAY_MODE_KEY = "resetTimerDisplayMode";
 const TIME_FORMAT_MODE_KEY = "timeFormatMode";
 const MENUBAR_ICON_STYLE_KEY = "menubarIconStyle";
+const MENUBAR_METRIC_KEY = "menubarMetric";
 const LEGACY_TRAY_ICON_STYLE_KEY = "trayIconStyle";
 const LEGACY_TRAY_SHOW_PERCENTAGE_KEY = "trayShowPercentage";
 const GLOBAL_SHORTCUT_KEY = "globalShortcut";
 const START_ON_LOGIN_KEY = "startOnLogin";
+const RETIREMENT_NOTICE_DISMISSED_AT_KEY = "retirementNoticeDismissedAt";
+
+// How long a dismissal lasts before the retirement notice is shown again (7 days).
+export const RETIREMENT_NOTICE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export const DEFAULT_AUTO_UPDATE_INTERVAL: AutoUpdateIntervalMinutes = 15;
 export const DEFAULT_THEME_MODE: ThemeMode = "system";
@@ -43,6 +50,7 @@ export const DEFAULT_DISPLAY_MODE: DisplayMode = "left";
 export const DEFAULT_RESET_TIMER_DISPLAY_MODE: ResetTimerDisplayMode = "relative";
 export const DEFAULT_TIME_FORMAT_MODE: TimeFormatMode = "auto";
 export const DEFAULT_MENUBAR_ICON_STYLE: MenubarIconStyle = "provider";
+export const DEFAULT_MENUBAR_METRIC: MenubarMetric = "default";
 export const DEFAULT_GLOBAL_SHORTCUT: GlobalShortcut = null;
 export const DEFAULT_START_ON_LOGIN = false;
 
@@ -52,11 +60,17 @@ const DISPLAY_MODES: DisplayMode[] = ["used", "left"];
 const RESET_TIMER_DISPLAY_MODES: ResetTimerDisplayMode[] = ["relative", "absolute"];
 const TIME_FORMAT_MODES: TimeFormatMode[] = ["auto", "12h", "24h"];
 const MENUBAR_ICON_STYLES: MenubarIconStyle[] = ["provider", "donut", "bars"];
+const MENUBAR_METRICS: MenubarMetric[] = ["default", "weekly"];
 
 export const MENUBAR_ICON_STYLE_OPTIONS: { value: MenubarIconStyle; label: string }[] = [
   { value: "provider", label: "Plugin" },
   { value: "donut", label: "Donut" },
   { value: "bars", label: "Bars" },
+];
+
+export const MENUBAR_METRIC_OPTIONS: { value: MenubarMetric; label: string }[] = [
+  { value: "default", label: "Default" },
+  { value: "weekly", label: "Weekly" },
 ];
 
 export const AUTO_UPDATE_OPTIONS: { value: AutoUpdateIntervalMinutes; label: string }[] =
@@ -285,6 +299,21 @@ export async function saveMenubarIconStyle(style: MenubarIconStyle): Promise<voi
   await store.save();
 }
 
+function isMenubarMetric(value: unknown): value is MenubarMetric {
+  return typeof value === "string" && MENUBAR_METRICS.includes(value as MenubarMetric);
+}
+
+export async function loadMenubarMetric(): Promise<MenubarMetric> {
+  const stored = await store.get<unknown>(MENUBAR_METRIC_KEY);
+  if (isMenubarMetric(stored)) return stored;
+  return DEFAULT_MENUBAR_METRIC;
+}
+
+export async function saveMenubarMetric(metric: MenubarMetric): Promise<void> {
+  await store.set(MENUBAR_METRIC_KEY, metric);
+  await store.save();
+}
+
 type LegacyStoreWithDelete = {
   delete?: (key: string) => Promise<void>;
 };
@@ -355,4 +384,28 @@ export async function loadStartOnLogin(): Promise<boolean> {
 export async function saveStartOnLogin(value: boolean): Promise<void> {
   await store.set(START_ON_LOGIN_KEY, value);
   await store.save();
+}
+
+export async function loadRetirementNoticeDismissedAt(): Promise<number | null> {
+  const stored = await store.get<unknown>(RETIREMENT_NOTICE_DISMISSED_AT_KEY);
+  if (typeof stored === "number" && Number.isFinite(stored) && stored >= 0) {
+    return stored;
+  }
+  return null;
+}
+
+export async function saveRetirementNoticeDismissedAt(value: number): Promise<void> {
+  await store.set(RETIREMENT_NOTICE_DISMISSED_AT_KEY, value);
+  await store.save();
+}
+
+export function shouldShowRetirementNotice(
+  dismissedAt: number | null,
+  now: number
+): boolean {
+  if (dismissedAt == null) return true;
+  // A dismissal in the future (clock skew or a manual settings edit) is
+  // invalid; show the notice instead of hiding it indefinitely.
+  if (dismissedAt > now) return true;
+  return now - dismissedAt >= RETIREMENT_NOTICE_INTERVAL_MS;
 }

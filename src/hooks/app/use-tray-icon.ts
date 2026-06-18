@@ -3,7 +3,7 @@ import { resolveResource } from "@tauri-apps/api/path"
 import { TrayIcon } from "@tauri-apps/api/tray"
 import { isWindowsRuntime } from "@/lib/platform"
 import type { PluginMeta } from "@/lib/plugin-types"
-import type { DisplayMode, MenubarIconStyle, PluginSettings } from "@/lib/settings"
+import type { DisplayMode, MenubarIconStyle, MenubarMetric, PluginSettings } from "@/lib/settings"
 import { getEnabledPluginIds } from "@/lib/settings"
 import { getTrayIconSizePx, renderTrayBarsIcon } from "@/lib/tray-bars-icon"
 import { getTrayPrimaryBars, type TrayPrimaryBar } from "@/lib/tray-primary-progress"
@@ -18,6 +18,7 @@ type UseTrayIconArgs = {
   pluginStates: Record<string, PluginState>
   displayMode: DisplayMode
   menubarIconStyle: MenubarIconStyle
+  menubarMetric: MenubarMetric
   activeView: string
 }
 
@@ -56,6 +57,7 @@ export function useTrayIcon({
   pluginStates,
   displayMode,
   menubarIconStyle,
+  menubarMetric,
   activeView,
 }: UseTrayIconArgs) {
   const trayRef = useRef<TrayIcon | null>(null)
@@ -74,6 +76,7 @@ export function useTrayIcon({
   const pluginStatesRef = useRef(pluginStates)
   const displayModeRef = useRef(displayMode)
   const menubarIconStyleRef = useRef(menubarIconStyle)
+  const menubarMetricRef = useRef(menubarMetric)
   const activeViewRef = useRef(activeView)
   const lastTrayProviderIdRef = useRef<string | null>(null)
 
@@ -96,6 +99,10 @@ export function useTrayIcon({
   useEffect(() => {
     menubarIconStyleRef.current = menubarIconStyle
   }, [menubarIconStyle])
+
+  useEffect(() => {
+    menubarMetricRef.current = menubarMetric
+  }, [menubarMetric])
 
   useEffect(() => {
     activeViewRef.current = activeView
@@ -189,6 +196,7 @@ export function useTrayIcon({
       }
 
       const style = menubarIconStyleRef.current
+      const preferWeekly = menubarMetricRef.current === "weekly"
       const sizePx = getTrayIconSizePx(window.devicePixelRatio)
       const nextActiveView = activeViewRef.current
       const activeProviderId =
@@ -212,6 +220,7 @@ export function useTrayIcon({
         pluginStates: pluginStatesRef.current,
         maxBars: 4,
         displayMode: displayModeRef.current,
+        preferWeekly,
       })
 
       const providerBars = trayProviderId
@@ -222,6 +231,7 @@ export function useTrayIcon({
             maxBars: 1,
             displayMode: displayModeRef.current,
             pluginId: trayProviderId,
+            preferWeekly,
           })
         : []
 
@@ -246,8 +256,9 @@ export function useTrayIcon({
         pluginStates: pluginStatesRef.current,
         maxBars: 20, // Show more in tooltip
         displayMode: displayModeRef.current,
+        preferWeekly,
       })
-      const tooltip = formatTrayTooltip(tooltipBars, pluginsMetaRef.current)
+      const tooltip = formatTrayTooltip(tooltipBars, pluginsMetaRef.current, preferWeekly)
       const updateTooltip = () => setTrayTooltip(tooltip)
 
       if (isWindowsRuntime()) {
@@ -385,7 +396,7 @@ export function useTrayIcon({
   useEffect(() => {
     if (!trayReady) return
     scheduleTrayIconUpdate("settings", 0)
-  }, [activeView, menubarIconStyle, scheduleTrayIconUpdate, trayReady])
+  }, [activeView, menubarIconStyle, menubarMetric, scheduleTrayIconUpdate, trayReady])
 
   useEffect(() => {
     return () => {
