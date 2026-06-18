@@ -8,6 +8,12 @@ describe("OverviewPage", () => {
     expect(screen.getByText("No providers enabled")).toBeInTheDocument()
   })
 
+  it("does not render the mac-only retirement notice in the Windows fork", () => {
+    render(<OverviewPage plugins={[]} displayMode="used" resetTimerDisplayMode="relative" />)
+    expect(screen.queryByText("OpenUsage Has Moved")).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Get the New App" })).not.toBeInTheDocument()
+  })
+
   it("renders provider cards", () => {
     const plugins = [
       {

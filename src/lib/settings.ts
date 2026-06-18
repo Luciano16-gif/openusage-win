@@ -39,10 +39,6 @@ const LEGACY_TRAY_ICON_STYLE_KEY = "trayIconStyle";
 const LEGACY_TRAY_SHOW_PERCENTAGE_KEY = "trayShowPercentage";
 const GLOBAL_SHORTCUT_KEY = "globalShortcut";
 const START_ON_LOGIN_KEY = "startOnLogin";
-const RETIREMENT_NOTICE_DISMISSED_AT_KEY = "retirementNoticeDismissedAt";
-
-// How long a dismissal lasts before the retirement notice is shown again (7 days).
-export const RETIREMENT_NOTICE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export const DEFAULT_AUTO_UPDATE_INTERVAL: AutoUpdateIntervalMinutes = 15;
 export const DEFAULT_THEME_MODE: ThemeMode = "system";
@@ -384,28 +380,4 @@ export async function loadStartOnLogin(): Promise<boolean> {
 export async function saveStartOnLogin(value: boolean): Promise<void> {
   await store.set(START_ON_LOGIN_KEY, value);
   await store.save();
-}
-
-export async function loadRetirementNoticeDismissedAt(): Promise<number | null> {
-  const stored = await store.get<unknown>(RETIREMENT_NOTICE_DISMISSED_AT_KEY);
-  if (typeof stored === "number" && Number.isFinite(stored) && stored >= 0) {
-    return stored;
-  }
-  return null;
-}
-
-export async function saveRetirementNoticeDismissedAt(value: number): Promise<void> {
-  await store.set(RETIREMENT_NOTICE_DISMISSED_AT_KEY, value);
-  await store.save();
-}
-
-export function shouldShowRetirementNotice(
-  dismissedAt: number | null,
-  now: number
-): boolean {
-  if (dismissedAt == null) return true;
-  // A dismissal in the future (clock skew or a manual settings edit) is
-  // invalid; show the notice instead of hiding it indefinitely.
-  if (dismissedAt > now) return true;
-  return now - dismissedAt >= RETIREMENT_NOTICE_INTERVAL_MS;
 }
