@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.6.28
+
+### New Features
+- feat: add retirement notice banner to overview ([#616](https://github.com/robinebers/openusage/pull/616)) by @robinebers
+- feat(codex): show rate limit resets ([#577](https://github.com/robinebers/openusage/pull/577)) by @robinebers
+- feat: add weekly menubar metric preference ([#555](https://github.com/robinebers/openusage/pull/555)) by @michaljuris
+
+### Bug Fixes
+- fix: patch security vulnerabilities via dep updates and overrides ([#712](https://github.com/robinebers/openusage/pull/712)) by @devin-ai-integration
+- fix: treat future/negative retirement dismissal timestamps as invalid ([#616](https://github.com/robinebers/openusage/pull/616)) by @robinebers
+- fix: show retirement notice when stored state fails to load ([#616](https://github.com/robinebers/openusage/pull/616)) by @robinebers
+- fix: patch Rust security vulnerabilities via cargo update ([#570](https://github.com/robinebers/openusage/pull/570)) by @devin-ai-integration
+- fix(codex): reload auth during 401 recovery ([#568](https://github.com/robinebers/openusage/pull/568)) by @robinebers
+- fix(codex): align token refresh handling ([#568](https://github.com/robinebers/openusage/pull/568)) by @robinebers
+- fix(codex): recover from reused refresh token ([#568](https://github.com/robinebers/openusage/pull/568)) by @robinebers
+
+### Refactor
+- Refactor Codex credits display ([#567](https://github.com/robinebers/openusage/pull/567)) by @robinebers
+
+### Chores
+- chore: remove General Question from issue template chooser by @robinebers
+- chore: release-tauri must publish notes and re-run CI (not hand-create) ([#620](https://github.com/robinebers/openusage/pull/620)) by @robinebers
+- chore: address Bugbot/cubic review on release-tauri skill ([#620](https://github.com/robinebers/openusage/pull/620)) by @robinebers
+- chore: address Bugbot findings on release-tauri skill ([#620](https://github.com/robinebers/openusage/pull/620)) by @robinebers
+- chore: add Tauri-to-Swift rollout guardrails and rename release skill ([#620](https://github.com/robinebers/openusage/pull/620)) by @robinebers
+- docs: update agent instructions by @robinebers
+
+---
+
+### Changelog
+
+**Full Changelog**: [v0.6.27...v0.6.28](https://github.com/robinebers/openusage/compare/v0.6.27...v0.6.28)
+
 ## v0.6.27
 
 ### Bug Fixes
