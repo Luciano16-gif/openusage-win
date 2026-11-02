@@ -109,3 +109,7 @@ Use below list to store and recall user notes when asked to do so.
 - Use this list when asked to remember things. Keep each list item concise.
 - Tauri IPC: JS must use camelCase (`{ batchId, pluginIds }`), Tauri auto-converts to Rust's snake_case. Never send snake_case from JS—params silently won't match.
 - tauri-action `latest.json`: Parallel matrix builds are safe—action fetches existing `latest.json`, merges platform entries, re-uploads. No `max-parallel: 1` needed.
+
+## Code comments
+
+Do not add code comments unless I ask. If you think a comment is necessary, ask me first and explain why it is really necessary instead of writing better code.
