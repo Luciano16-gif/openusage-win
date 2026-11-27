@@ -25,7 +25,7 @@ OpenUsage lives in your menu bar and shows you how much of your AI coding subscr
 ## Supported Providers
 
 - [**Amp**](docs/providers/amp.md) / free tier, bonus, credits
-- [**Antigravity**](docs/providers/antigravity.md) / all models
+- [**Antigravity**](docs/providers/antigravity.md) / Gemini session & weekly, Argon weekly, Claude session & weekly
 - [**Claude**](docs/providers/claude.md) / session, weekly, extra usage, local token usage (ccusage)
 - [**Codex**](docs/providers/codex.md) / session, weekly, reviews, credits
 - [**Copilot**](docs/providers/copilot.md) / premium, chat, completions
