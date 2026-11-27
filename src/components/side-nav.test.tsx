@@ -118,6 +118,29 @@ describe("SideNav", () => {
     expect(onDragRegionMouseDown).toHaveBeenCalledTimes(1)
   })
 
+  it("starts dragging a plugin icon on movement without a hold delay", () => {
+    const onViewChange = vi.fn()
+    const { container } = render(
+      <SideNav
+        activeView="home"
+        onViewChange={onViewChange}
+        plugins={[
+          { id: "a", name: "A", iconUrl: "a.svg" },
+          { id: "b", name: "B", iconUrl: "b.svg" },
+        ]}
+      />
+    )
+
+    const item = container.querySelector<HTMLElement>("[data-sortable-plugin]")!
+    fireEvent.pointerDown(item, { isPrimary: true, button: 0, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(document, { isPrimary: true, clientX: 30, clientY: 40 })
+
+    expect(item).toHaveAttribute("aria-pressed", "true")
+
+    fireEvent.pointerUp(document, { isPrimary: true, clientX: 30, clientY: 40 })
+    expect(onViewChange).not.toHaveBeenCalled()
+  })
+
   it("keeps plugin list as the only flexible sidebar section", () => {
     const onViewChange = vi.fn()
     const onDragRegionMouseDown = vi.fn()

@@ -10,6 +10,7 @@ import {
   useSensor,
   useSensors,
   type DragEndEvent,
+  type Modifier,
 } from "@dnd-kit/core"
 import {
   arrayMove,
@@ -42,6 +43,10 @@ interface NavPlugin {
 }
 
 const INTERACTIVE_DRAG_SELECTOR = "button, a, input, textarea, select, [role='button'], [data-sortable-plugin]"
+
+const restrictToVerticalAxis: Modifier = ({ transform }) => ({ ...transform, x: 0 })
+
+const DRAG_MODIFIERS = [restrictToVerticalAxis]
 
 interface SideNavProps {
   activeView: ActiveView
@@ -162,7 +167,7 @@ export function SideNav({
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
-      activationConstraint: { delay: 300, tolerance: 5 },
+      activationConstraint: { distance: 5 },
     })
   )
 
@@ -251,6 +256,7 @@ export function SideNav({
         <DndContext
           sensors={sensors}
           collisionDetection={closestCenter}
+          modifiers={DRAG_MODIFIERS}
           onDragEnd={handleDragEnd}
         >
           <SortableContext
