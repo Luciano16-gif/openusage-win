@@ -2,7 +2,7 @@
 
 > Reverse-engineered from app bundle and language server binary. May change without notice.
 
-Antigravity is built on Codeium/Windsurf-derived infrastructure and uses the same Codeium language server binary and Connect-RPC protocol. The discovery, port probing, and RPC endpoints are virtually identical to that stack. The key differences: Antigravity uses fraction-based per-model quota (not credits), and doesn't require an API key in the request metadata.
+Antigravity is built on Codeium/Windsurf-derived infrastructure and uses the same Codeium language server binary and Connect-RPC protocol. The discovery, port probing, and RPC endpoints are virtually identical to that stack. The key differences: Antigravity uses fraction-based quota pools (not credits), and doesn't require an API key in the request metadata.
 
 ## Overview
 
@@ -11,13 +11,27 @@ Antigravity is built on Codeium/Windsurf-derived infrastructure and uses the sam
 - **Service:** `exa.language_server_pb.LanguageServerService`
 - **Auth:** CSRF token from app/IDE process args; Google OAuth tokens from SQLite; `agy` token from macOS Keychain
 - **Quota:** fraction (0.0–1.0, where 1.0 = 100% remaining)
-- **Quota window:** 5 hours
+- **Quota pools:** all Gemini models share one pool; Claude and other non-Gemini models share a second pool. Each pool has a 5-hour and a weekly window (since 2026-05-19).
 - **Timestamps:** ISO 8601
 - **Requires:** Antigravity app/IDE running, signed-in app/IDE SQLite credentials, or `agy` signed in
 
 ## Discovery
 
-The Antigravity app/IDE language server listens on a random localhost port. Three values must be discovered from the running process.
+The Antigravity app/IDE language server listens on a random localhost port. OpenUsage needs its port and CSRF token.
+
+### Daemon file (Antigravity 2.35+)
+
+Since 2.35, the token is no longer on the command line. Antigravity writes one file per running server to `~/.gemini/antigravity/daemon/hub_<httpPort>.json`:
+
+```json
+{ "pid": 15752, "httpsPort": 61475, "httpPort": 61476, "lsVersion": "2.35.2", "csrfToken": "<token>" }
+```
+
+Old files from earlier sessions stay behind, so OpenUsage only uses the file whose `pid` matches the running `language_server` process. It then calls `httpPort` directly, with no port probing.
+
+### Process arguments (older versions)
+
+When no daemon file matches, OpenUsage falls back to reading the token from the process arguments:
 
 ```bash
 # 1. Find process and extract CSRF token
@@ -34,7 +48,7 @@ lsof -nP -iTCP -sTCP:LISTEN -a -p <pid>
 POST https://127.0.0.1:<port>/.../GetUnleashData  → first 200 OK wins
 ```
 
-Port and CSRF token change on every app/IDE restart. The LS may use HTTPS with a self-signed cert.
+Port and CSRF token change on every app/IDE restart. The LS may use HTTPS with a self-signed cert. Some of the process's other ports belong to different local services and answer `401`; the port probe skips those.
 
 `agy` can also expose the same local service via an `agy` process. It has listening ports but no CSRF token or Antigravity marker flags, so discovery matches the `agy` executable directly.
 
@@ -44,11 +58,69 @@ Port and CSRF token change on every app/IDE restart. The LS may use HTTPS with a
 |---|---|---|
 | Content-Type | yes | `application/json` |
 | Connect-Protocol-Version | yes | `1` |
-| x-codeium-csrf-token | yes | `<csrf_token>` (from process args) |
+| x-codeium-csrf-token | yes | `<csrf_token>` (from the daemon file or process args) |
+| x-antigravity-csrf-token | yes | same token; newer builds document this name |
+
+## What OpenUsage Shows
+
+| Row | Source bucket | Window |
+|---|---|---|
+| Session | `gemini-5h` | 5 hours |
+| Weekly | `gemini-weekly` | 7 days |
+| Argon Weekly | the one weekly bucket in the `Gemini 4 Argon` group | 7 days |
+| Claude | `3p-5h` | 5 hours |
+| Claude Weekly | `3p-weekly` | 7 days |
+
+A row only appears when Google reports a usable value for it. Argon Weekly is skipped when the Argon group is missing, disabled, malformed, or has more than one weekly bucket.
 
 ## Endpoints
 
-### GetUserStatus (primary)
+### RetrieveUserQuotaSummary (primary)
+
+The only endpoint that reports the shared pools and their weekly windows. OpenUsage asks it first on every source.
+
+```
+POST http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary
+```
+
+The request body is the same `metadata` object as `GetUserStatus`. A 404 means the build doesn't have it, and OpenUsage falls back to `GetUserStatus`. The plan name still comes from `GetUserStatus`.
+
+#### Response
+
+The language server wraps the groups in `response`. Cloud Code returns `groups` at the top level.
+
+```jsonc
+{
+  "response": {
+    "groups": [
+      {
+        "displayName": "Gemini Models",
+        "buckets": [
+          { "bucketId": "gemini-5h", "remainingFraction": 0.8, "resetTime": "2026-10-27T00:00:00Z" },
+          { "bucketId": "gemini-weekly", "remainingFraction": 0.7, "resetTime": "2026-10-30T00:00:00Z", "window": "weekly" }
+        ]
+      },
+      {
+        "displayName": "Gemini 4 Argon",
+        "buckets": [
+          { "bucketId": "gemini-argon-wtu-weekly", "remainingFraction": 1, "window": "weekly" }
+        ]
+      },
+      {
+        "displayName": "Claude and GPT models",
+        "buckets": [
+          { "bucketId": "3p-5h", "remainingFraction": 0.6 },
+          { "bucketId": "3p-weekly", "remainingFraction": 0.5, "window": "weekly" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+A parsed summary is the final answer for that source, even when it has no usable buckets. OpenUsage never mixes in the legacy endpoints then, because they report a model with missing quota info as fully used.
+
+### GetUserStatus (legacy fallback, plan name)
 
 Returns plan info and per-model quota for all models (Gemini, Claude, GPT-OSS) in a single call.
 
@@ -153,7 +225,7 @@ POST http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetCom
 | Claude Opus 4.6 (Thinking) | MODEL_PLACEHOLDER_M26 | Anthropic (proxied) |
 | GPT-OSS 120B (Medium) | 342 | OpenAI (proxied) |
 
-Models are dynamic — the list changes as Google adds/removes them. The plugin reads labels from the response, not a hardcoded list.
+Models are dynamic — the list changes as Google adds/removes them. The legacy fallback reads labels from the response and merges them into two rows: every Gemini model goes into **Session**, everything else into **Claude**. Each row keeps the pool's worst remaining fraction. These endpoints only have the 5-hour window, so the weekly rows are empty on this fallback.
 
 Interestingly, non-Google models (Claude, GPT-OSS) are proxied through Codeium/Windsurf infrastructure — Antigravity uses the same language server binary as Windsurf. The `GetUserStatus` response also includes `monthlyPromptCredits`, `monthlyFlowCredits`, and `monthlyFlexCreditPurchaseAmount` fields inherited from the Windsurf credit system, but these appear to be completely irrelevant to Antigravity's quota model which is purely fraction-based per model.
 
@@ -212,7 +284,34 @@ Same client_id/secret is there in the Antigravity app bundle, used for the Googl
 
 When the language server is not running, the plugin falls back to Google's Cloud Code API using a Google OAuth access token from the unified-state protobuf, a cached refreshed token, or the `agy` keychain account.
 
-### fetchAvailableModels
+### loadCodeAssist (plan and project)
+
+```
+POST https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist
+User-Agent: antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=amd64)
+
+{ "metadata": { "ideType": "ANTIGRAVITY", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI" } }
+```
+
+Production is tried first, then daily. OpenUsage calls it the way the Antigravity app does, because Google leaves out the tier for other callers. It provides:
+
+- `cloudaicompanionProject`: sent with the quota summary. Free accounts get `403 SUBSCRIPTION_REQUIRED` without it.
+- The plan: a known `paidTier.id` wins (`g1-pro-tier` → Google AI Pro, `g1-ultra-tier` → Google AI Ultra, `g1-ultra-lite-tier` → Google AI Ultra Lite). Otherwise the tier name is used, shortened to "Google AI Pro/Ultra/Ultra Lite" when it mentions one.
+
+### retrieveUserQuotaSummary
+
+```
+POST https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary
+User-Agent: antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=amd64)
+
+{ "project": "<cloudaicompanionProject>" }
+```
+
+OpenUsage asks the daily host first, because it has the live counters. If daily's answer has all four shared-pool windows, that's used. Otherwise OpenUsage also asks production and combines the two, with daily winning where both report the same window. The `hub` User-Agent is what exposes the Argon quota.
+
+If neither host answers with a summary (for example a 404, or `SUBSCRIPTION_REQUIRED`), OpenUsage falls back to `fetchAvailableModels`. A sign-in rejection counts as an expired token instead, so it triggers the refresh flow rather than the fallback.
+
+### fetchAvailableModels (legacy fallback)
 
 ```
 POST https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels
@@ -232,7 +331,8 @@ Base URLs tried in order:
 For `agy`, OpenUsage calls:
 
 1. `POST /v1internal:loadCodeAssist`
-2. `POST /v1internal:retrieveUserQuota`
+2. `POST /v1internal:retrieveUserQuotaSummary` (same as above)
+3. `POST /v1internal:retrieveUserQuota` only when there is no summary
 
 #### Response
 
@@ -260,10 +360,10 @@ The Cloud Code model set is a superset of the LS model set. The LS returns only 
 
 ## Plugin Strategy
 
-1. Probe the Antigravity app/IDE language server.
-2. Probe the `agy` local language server.
+1. Probe the Antigravity app/IDE language server: `RetrieveUserQuotaSummary`, then `GetUserStatus` / `GetCommandModelConfigs` as the fallback.
+2. Probe the `agy` local language server the same way.
 3. Read SQLite token candidates from both Antigravity state DB paths.
-4. Try unexpired SQLite/cached access tokens with `fetchAvailableModels`.
+4. Try unexpired SQLite/cached access tokens with `loadCodeAssist` and `retrieveUserQuotaSummary`, falling back to `fetchAvailableModels`.
 5. Refresh SQLite refresh tokens only after auth failure or when no access token exists.
-6. Read `agy` keychain token from service `gemini`, account `antigravity`, then call `loadCodeAssist` and `retrieveUserQuota`.
+6. Read `agy` keychain token from service `gemini`, account `antigravity`, then call `loadCodeAssist` and `retrieveUserQuotaSummary`, falling back to `retrieveUserQuota`.
 7. If all strategies fail: error "Start Antigravity or run `agy` and try again."

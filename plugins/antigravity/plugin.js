@@ -13,7 +13,28 @@
   var LOAD_CODE_ASSIST_PATH = "/v1internal:loadCodeAssist"
   var FETCH_MODELS_PATH = "/v1internal:fetchAvailableModels"
   var RETRIEVE_QUOTA_PATH = "/v1internal:retrieveUserQuota"
+  var QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary"
+  var QUOTA_SUMMARY_URLS = CLOUD_CODE_URLS
+  var LOAD_CODE_ASSIST_URLS = [CLOUD_CODE_URLS[1], CLOUD_CODE_URLS[0]]
+  var CLOUD_CODE_CLIENT_UA = "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=amd64)"
+  var LOAD_CODE_ASSIST_METADATA = { ideType: "ANTIGRAVITY", platform: "PLATFORM_UNSPECIFIED", pluginType: "GEMINI" }
+  var SESSION_PERIOD_MS = 5 * 60 * 60 * 1000
+  var WEEK_PERIOD_MS = 7 * 24 * 60 * 60 * 1000
+  var SUMMARY_BUCKETS = [
+    { id: "gemini-5h", label: "Session", periodMs: SESSION_PERIOD_MS },
+    { id: "gemini-weekly", label: "Weekly", periodMs: WEEK_PERIOD_MS },
+    { id: "3p-5h", label: "Claude", periodMs: SESSION_PERIOD_MS },
+    { id: "3p-weekly", label: "Claude Weekly", periodMs: WEEK_PERIOD_MS },
+  ]
+  var ARGON_GROUP_NAME = "Gemini 4 Argon"
+  var ARGON_WEEKLY_LABEL = "Argon Weekly"
+  var PAID_TIER_PLANS = {
+    "g1-pro-tier": "Google AI Pro",
+    "g1-ultra-tier": "Google AI Ultra",
+    "g1-ultra-lite-tier": "Google AI Ultra Lite",
+  }
   var LOGIN_MESSAGE = "Start Antigravity or run `agy` and try again."
+  var DAEMON_DIR = "~/.gemini/antigravity/daemon"
   var GOOGLE_OAUTH_URL = "https://oauth2.googleapis.com/token"
   var GOOGLE_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
   var GOOGLE_CLIENT_SECRET = "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"
@@ -278,13 +299,59 @@
 
   // --- LS discovery ---
 
+  function readDaemonEntry(ctx, pid) {
+    var names
+    try {
+      names = ctx.host.fs.listDir(DAEMON_DIR)
+    } catch (e) {
+      return null
+    }
+    for (var i = 0; i < names.length; i++) {
+      if (!/^hub_\d+\.json$/.test(names[i])) continue
+      var entry = null
+      try {
+        entry = ctx.util.tryParseJson(ctx.host.fs.readText(DAEMON_DIR + "/" + names[i]))
+      } catch (e) {
+        ctx.host.log.warn("failed to read Antigravity daemon file " + names[i] + ": " + String(e))
+        continue
+      }
+      if (!entry || entry.pid !== pid) continue
+      if (typeof entry.csrfToken !== "string" || !entry.csrfToken || typeof entry.httpPort !== "number") {
+        ctx.host.log.warn("Antigravity daemon file " + names[i] + " is missing its token or port")
+        continue
+      }
+      return entry
+    }
+    return null
+  }
+
   function discoverLs(ctx) {
-    return ctx.host.ls.discover({
+    var discovery = ctx.host.ls.discover({
       processName: "language_server",
       markers: ["antigravity", "antigravity-ide"],
-      csrfFlag: "--csrf_token",
+      csrfFlag: "",
       portFlag: "--extension_server_port",
+      extraFlags: ["--csrf_token"],
     })
+    if (!discovery) return null
+
+    var daemon = readDaemonEntry(ctx, discovery.pid)
+    if (daemon) {
+      return {
+        pid: discovery.pid,
+        csrf: daemon.csrfToken,
+        ports: [],
+        endpoint: { port: daemon.httpPort, scheme: "http" },
+      }
+    }
+
+    var csrf = discovery.csrf || (discovery.extra && discovery.extra.csrf_token) || ""
+    if (!csrf) {
+      ctx.host.log.warn("Antigravity language server found, but no daemon file or CSRF flag for pid " + discovery.pid)
+      return null
+    }
+    discovery.csrf = csrf
+    return discovery
   }
 
   function discoverAgyLs(ctx) {
@@ -297,13 +364,14 @@
   }
 
   function probePort(ctx, scheme, port, csrf) {
-    ctx.host.http.request({
+    var resp = ctx.host.http.request({
       method: "POST",
       url: scheme + "://127.0.0.1:" + port + "/" + LS_SERVICE + "/GetUnleashData",
       headers: {
         "Content-Type": "application/json",
         "Connect-Protocol-Version": "1",
         "x-codeium-csrf-token": csrf,
+        "x-antigravity-csrf-token": csrf,
       },
       bodyText: JSON.stringify({
         context: {
@@ -319,8 +387,7 @@
       timeoutMs: 5000,
       dangerouslyIgnoreTls: scheme === "https",
     })
-    // Any HTTP response means this port is alive (even 400 validation errors).
-    return true
+    return !(resp && ctx.util.isAuthStatus(resp.status))
   }
 
   function findWorkingPort(ctx, discovery) {
@@ -336,7 +403,7 @@
     return null
   }
 
-  function callLs(ctx, port, scheme, csrf, method, body) {
+  function callLs(ctx, port, scheme, csrf, method, body, opts) {
     var resp = ctx.host.http.request({
       method: "POST",
       url: scheme + "://127.0.0.1:" + port + "/" + LS_SERVICE + "/" + method,
@@ -344,13 +411,16 @@
         "Content-Type": "application/json",
         "Connect-Protocol-Version": "1",
         "x-codeium-csrf-token": csrf,
+        "x-antigravity-csrf-token": csrf,
       },
       bodyText: JSON.stringify(body || {}),
       timeoutMs: 10000,
       dangerouslyIgnoreTls: scheme === "https",
     })
     if (resp.status < 200 || resp.status >= 300) {
-      ctx.host.log.warn("callLs " + method + " returned " + resp.status)
+      if (!(opts && opts.quietStatus === resp.status)) {
+        ctx.host.log.warn("callLs " + method + " returned " + resp.status)
+      }
       return null
     }
     return ctx.util.tryParseJson(resp.bodyText)
@@ -364,26 +434,12 @@
   }
 
   function poolLabel(normalizedLabel) {
-    var lower = normalizedLabel.toLowerCase()
-    if (lower.indexOf("gemini") !== -1 && lower.indexOf("pro") !== -1) return "Gemini Pro"
-    if (lower.indexOf("gemini") !== -1 && lower.indexOf("flash") !== -1) return "Gemini Flash"
+    if (normalizedLabel.toLowerCase().indexOf("gemini") !== -1) return "Session"
     // All non-Gemini models (Claude, GPT-OSS, etc.) share a single quota pool
     return "Claude"
   }
 
-  function modelSortKey(label) {
-    var lower = label.toLowerCase()
-    // Gemini Pro variants first, then other Gemini, then Claude Opus, then other Claude, then rest
-    if (lower.indexOf("gemini") !== -1 && lower.indexOf("pro") !== -1) return "0a_" + label
-    if (lower.indexOf("gemini") !== -1) return "0b_" + label
-    if (lower.indexOf("claude") !== -1 && lower.indexOf("opus") !== -1) return "1a_" + label
-    if (lower.indexOf("claude") !== -1) return "1b_" + label
-    return "2_" + label
-  }
-
-  var QUOTA_PERIOD_MS = 5 * 60 * 60 * 1000 // 5 hours
-
-  function modelLine(ctx, label, remainingFraction, resetTime) {
+  function percentLine(ctx, label, remainingFraction, resetTime, periodMs) {
     var clamped = Math.max(0, Math.min(1, remainingFraction))
     var used = Math.round((1 - clamped) * 100)
     return ctx.line.progress({
@@ -392,8 +448,168 @@
       limit: 100,
       format: { kind: "percent" },
       resetsAt: resetTime || undefined,
-      periodDurationMs: QUOTA_PERIOD_MS,
+      periodDurationMs: periodMs,
     })
+  }
+
+  function modelLine(ctx, label, remainingFraction, resetTime) {
+    return percentLine(ctx, label, remainingFraction, resetTime, SESSION_PERIOD_MS)
+  }
+
+  function summaryGroups(data) {
+    if (!data || typeof data !== "object") return null
+    var groups = data.response && typeof data.response === "object" ? data.response.groups : undefined
+    if (groups === undefined || groups === null) groups = data.groups
+    return Array.isArray(groups) ? groups : null
+  }
+
+  function groupName(group) {
+    return group && typeof group.displayName === "string" ? group.displayName : null
+  }
+
+  function groupBuckets(group) {
+    if (!group || !Array.isArray(group.buckets)) return []
+    return group.buckets.filter(function (b) { return b && typeof b === "object" })
+  }
+
+  function usableFraction(bucket) {
+    return typeof bucket.remainingFraction === "number" && Number.isFinite(bucket.remainingFraction)
+  }
+
+  function summaryBucketSpec(id) {
+    for (var i = 0; i < SUMMARY_BUCKETS.length; i++) {
+      if (SUMMARY_BUCKETS[i].id === id) return SUMMARY_BUCKETS[i]
+    }
+    return null
+  }
+
+  function isCompleteSummary(data) {
+    var groups = summaryGroups(data)
+    if (!groups) return false
+    var usable = {}
+    for (var i = 0; i < groups.length; i++) {
+      if (groupName(groups[i]) === ARGON_GROUP_NAME) continue
+      var buckets = groupBuckets(groups[i])
+      for (var j = 0; j < buckets.length; j++) {
+        if (typeof buckets[j].bucketId === "string" && usableFraction(buckets[j])) usable[buckets[j].bucketId] = true
+      }
+    }
+    for (var k = 0; k < SUMMARY_BUCKETS.length; k++) {
+      if (!usable[SUMMARY_BUCKETS[k].id]) return false
+    }
+    return true
+  }
+
+  function argonWeeklyLine(ctx, groups) {
+    var buckets = []
+    var found = false
+    for (var i = 0; i < groups.length; i++) {
+      if (groupName(groups[i]) !== ARGON_GROUP_NAME) continue
+      found = true
+      buckets = buckets.concat(groupBuckets(groups[i]))
+    }
+    if (!found) return null
+    var weekly = []
+    for (var j = 0; j < buckets.length; j++) {
+      if (buckets[j].window === "weekly") {
+        weekly.push(buckets[j])
+      } else {
+        ctx.host.log.warn("Argon quota has unsupported window '" + String(buckets[j].window) + "'; skipping its bucket")
+      }
+    }
+    var bucket = weekly[0]
+    var id = weekly.length === 1 && typeof bucket.bucketId === "string" ? bucket.bucketId : ""
+    if (!id || summaryBucketSpec(id)) {
+      ctx.host.log.warn("Argon quota group has no unambiguous separate weekly bucket; dropping its line")
+      return null
+    }
+    if (bucket.disabled !== undefined && bucket.disabled !== null && typeof bucket.disabled !== "boolean") {
+      ctx.host.log.warn("Argon weekly quota has an unusable disabled flag; dropping its line")
+      return null
+    }
+    if (bucket.disabled === true) return null
+    if (!usableFraction(bucket)) {
+      ctx.host.log.warn("Argon weekly quota has no usable remainingFraction; dropping its line")
+      return null
+    }
+    return percentLine(ctx, ARGON_WEEKLY_LABEL, bucket.remainingFraction, bucket.resetTime, WEEK_PERIOD_MS)
+  }
+
+  function parseQuotaSummaries(ctx, bodies) {
+    var groupLists = []
+    for (var i = 0; i < bodies.length; i++) {
+      var groups = summaryGroups(bodies[i])
+      if (groups) {
+        groupLists.push(groups)
+      } else {
+        ctx.host.log.warn("quota summary response has no decodable groups; treating as not-a-summary")
+      }
+    }
+    if (groupLists.length === 0) return null
+
+    var pooled = {}
+    for (var g = 0; g < groupLists.length; g++) {
+      for (var j = 0; j < groupLists[g].length; j++) {
+        var group = groupLists[g][j]
+        if (groupName(group) === ARGON_GROUP_NAME) continue
+        var buckets = groupBuckets(group)
+        for (var k = 0; k < buckets.length; k++) {
+          var bucket = buckets[k]
+          var id = typeof bucket.bucketId === "string" ? bucket.bucketId : null
+          if (!id || !summaryBucketSpec(id)) {
+            ctx.host.log.warn("quota summary: skipping unrecognized bucket id '" + (id || "<absent>") + "'")
+            continue
+          }
+          if (pooled[id]) continue
+          if (!usableFraction(bucket)) {
+            ctx.host.log.warn("quota summary: bucket '" + id + "' has no usable remainingFraction; dropping its line")
+            continue
+          }
+          pooled[id] = bucket
+        }
+      }
+    }
+
+    var lines = []
+    var argonIndex = -1
+    for (var s = 0; s < SUMMARY_BUCKETS.length; s++) {
+      var spec = SUMMARY_BUCKETS[s]
+      var entry = pooled[spec.id]
+      if (!entry) continue
+      if (argonIndex === -1 && spec.id.indexOf("3p-") === 0) argonIndex = lines.length
+      lines.push(percentLine(ctx, spec.label, entry.remainingFraction, entry.resetTime, spec.periodMs))
+    }
+    for (var a = 0; a < groupLists.length; a++) {
+      var argon = argonWeeklyLine(ctx, groupLists[a])
+      if (!argon) continue
+      lines.splice(argonIndex === -1 ? lines.length : argonIndex, 0, argon)
+      break
+    }
+    return lines
+  }
+
+  function formatPlan(raw) {
+    var trimmed = typeof raw === "string" ? raw.trim() : ""
+    if (!trimmed) return null
+    var tiers = ["Ultra Lite", "Ultra", "Pro"]
+    for (var i = 0; i < tiers.length; i++) {
+      if (trimmed.toLowerCase().indexOf(tiers[i].toLowerCase()) !== -1) return "Google AI " + tiers[i]
+    }
+    return trimmed.split(/\s+/).map(function (word) {
+      return word.charAt(0).toUpperCase() + word.slice(1)
+    }).join(" ")
+  }
+
+  function parseLoadCodeAssistPlan(loadData) {
+    var paidTier = loadData && loadData.paidTier
+    if (paidTier && PAID_TIER_PLANS[paidTier.id]) return PAID_TIER_PLANS[paidTier.id]
+    var currentTier = loadData && loadData.currentTier
+    return formatPlan((paidTier && paidTier.name) || (currentTier && currentTier.name))
+  }
+
+  function parseProject(loadData) {
+    var project = loadData && loadData.cloudaicompanionProject
+    return typeof project === "string" && project.trim() ? project.trim() : null
   }
 
   function buildModelLines(ctx, configs) {
@@ -415,33 +631,24 @@
       }
     }
 
-    var models = []
-    var keys = Object.keys(deduped)
-    for (var i = 0; i < keys.length; i++) {
-      var m = deduped[keys[i]]
-      m.sortKey = modelSortKey(m.label)
-      models.push(m)
-    }
-
-    models.sort(function (a, b) {
-      return a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0
-    })
-
     var lines = []
-    for (var i = 0; i < models.length; i++) {
-      lines.push(modelLine(ctx, models[i].label, models[i].remainingFraction, models[i].resetTime))
+    var order = ["Session", "Claude"]
+    for (var i = 0; i < order.length; i++) {
+      var m = deduped[order[i]]
+      if (m) lines.push(modelLine(ctx, m.label, m.remainingFraction, m.resetTime))
     }
     return lines
   }
 
   // --- Cloud Code API ---
 
-  function requestCloudCodeJson(ctx, path, token, userAgent, body) {
-    for (var i = 0; i < CLOUD_CODE_URLS.length; i++) {
+  function requestCloudCodeJson(ctx, path, token, userAgent, body, bases) {
+    var urls = bases || CLOUD_CODE_URLS
+    for (var i = 0; i < urls.length; i++) {
       try {
         var resp = ctx.host.http.request({
           method: "POST",
-          url: CLOUD_CODE_URLS[i] + path,
+          url: urls[i] + path,
           headers: {
             Accept: "application/json",
             "Content-Type": "application/json",
@@ -452,27 +659,105 @@
           timeoutMs: 15000,
         })
         if (!resp || typeof resp.status !== "number" || !Number.isFinite(resp.status)) {
-          ctx.host.log.warn("Cloud Code returned invalid response shape (" + CLOUD_CODE_URLS[i] + ")")
+          ctx.host.log.warn("Cloud Code returned invalid response shape (" + urls[i] + ")")
           continue
         }
         if (ctx.util.isAuthStatus(resp.status)) return { _authFailed: true }
         if (resp.status >= 200 && resp.status < 300) {
           var json = ctx.util.tryParseJson(resp.bodyText)
           if (!json || typeof json !== "object") {
-            ctx.host.log.warn("Cloud Code returned invalid JSON (" + CLOUD_CODE_URLS[i] + ")")
+            ctx.host.log.warn("Cloud Code returned invalid JSON (" + urls[i] + ")")
             continue
           }
           return json
         }
       } catch (e) {
-        ctx.host.log.warn("Cloud Code request failed (" + CLOUD_CODE_URLS[i] + "): " + String(e))
+        ctx.host.log.warn("Cloud Code request failed (" + urls[i] + "): " + String(e))
       }
     }
     return null
   }
 
-  function probeCloudCode(ctx, token, userAgent) {
-    return requestCloudCodeJson(ctx, FETCH_MODELS_PATH, token, userAgent, {})
+  function loadCodeAssist(ctx, token) {
+    return requestCloudCodeJson(
+      ctx,
+      LOAD_CODE_ASSIST_PATH,
+      token,
+      CLOUD_CODE_CLIENT_UA,
+      { metadata: LOAD_CODE_ASSIST_METADATA },
+      LOAD_CODE_ASSIST_URLS
+    )
+  }
+
+  function requiresSubscription(ctx, resp) {
+    if (resp.status !== 403) return false
+    var body = ctx.util.tryParseJson(resp.bodyText)
+    var details = body && body.error && body.error.details
+    if (!Array.isArray(details)) return false
+    return details.some(function (d) { return d && d.reason === "SUBSCRIPTION_REQUIRED" })
+  }
+
+  function fetchQuotaSummary(ctx, token, project) {
+    var bodies = []
+    var sawAuthFailure = false
+    for (var i = 0; i < QUOTA_SUMMARY_URLS.length; i++) {
+      var base = QUOTA_SUMMARY_URLS[i]
+      var resp
+      try {
+        resp = ctx.host.http.request({
+          method: "POST",
+          url: base + QUOTA_SUMMARY_PATH,
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            Authorization: "Bearer " + token,
+            "User-Agent": CLOUD_CODE_CLIENT_UA,
+          },
+          bodyText: JSON.stringify(project ? { project: project } : {}),
+          timeoutMs: 15000,
+        })
+      } catch (e) {
+        ctx.host.log.warn("quota summary request failed (" + base + "): " + String(e))
+        continue
+      }
+      if (!resp || typeof resp.status !== "number" || !Number.isFinite(resp.status)) continue
+      if (resp.status >= 200 && resp.status < 300) {
+        var json = ctx.util.tryParseJson(resp.bodyText)
+        bodies.push(json)
+        if (i === 0 && isCompleteSummary(json)) break
+        continue
+      }
+      if (requiresSubscription(ctx, resp)) {
+        ctx.host.log.warn("quota summary: Google reports no Antigravity quota subscription (" + base + ", project " + (project ? "set" : "missing") + ")")
+        continue
+      }
+      if (ctx.util.isAuthStatus(resp.status)) {
+        sawAuthFailure = true
+        continue
+      }
+      ctx.host.log.warn("quota summary returned " + resp.status + " (" + base + ")")
+    }
+    if (bodies.length > 0) {
+      var lines = parseQuotaSummaries(ctx, bodies)
+      if (lines) return { lines: lines }
+    }
+    if (sawAuthFailure) return { _authFailed: true }
+    return null
+  }
+
+  function probeCloudCode(ctx, token) {
+    var loadData = loadCodeAssist(ctx, token)
+    if (loadData && loadData._authFailed) return loadData
+
+    var summary = fetchQuotaSummary(ctx, token, parseProject(loadData))
+    if (summary && summary._authFailed) return summary
+    if (summary) return { plan: parseLoadCodeAssistPlan(loadData), lines: summary.lines }
+
+    var data = requestCloudCodeJson(ctx, FETCH_MODELS_PATH, token, "antigravity", {})
+    if (!data || data._authFailed) return data
+    var lines = buildModelLines(ctx, parseCloudCodeModels(data))
+    if (lines.length === 0) return null
+    return { plan: parseLoadCodeAssistPlan(loadData), lines: lines }
   }
 
   function parseCloudCodeModels(data) {
@@ -502,18 +787,6 @@
     return configs
   }
 
-  function readAgyPlan(loadData) {
-    var paidTier = loadData && loadData.paidTier
-    if (paidTier && typeof paidTier.name === "string" && paidTier.name.trim()) {
-      return paidTier.name.trim()
-    }
-    var currentTier = loadData && loadData.currentTier
-    if (currentTier && typeof currentTier.name === "string" && currentTier.name.trim()) {
-      return currentTier.name.trim()
-    }
-    return null
-  }
-
   function parseAgyQuotaBuckets(data) {
     var buckets = data && data.buckets
     if (!Array.isArray(buckets)) return []
@@ -536,10 +809,11 @@
     var loadData = requestCloudCodeJson(ctx, LOAD_CODE_ASSIST_PATH, token, "agy", {})
     if (!loadData || loadData._authFailed) return loadData
 
-    var project =
-      typeof loadData.cloudaicompanionProject === "string" && loadData.cloudaicompanionProject.trim()
-        ? loadData.cloudaicompanionProject.trim()
-        : null
+    var project = parseProject(loadData)
+    var summary = fetchQuotaSummary(ctx, token, project)
+    if (summary && summary._authFailed) return summary
+    if (summary) return { plan: parseLoadCodeAssistPlan(loadData), lines: summary.lines }
+
     var quotaData = null
     if (project) {
       quotaData = requestCloudCodeJson(ctx, RETRIEVE_QUOTA_PATH, token, "agy", { project: project })
@@ -551,7 +825,7 @@
 
     var lines = buildModelLines(ctx, parseAgyQuotaBuckets(quotaData))
     if (lines.length === 0) return null
-    return { plan: readAgyPlan(loadData), lines: lines }
+    return { plan: parseLoadCodeAssistPlan(loadData), lines: lines }
   }
 
   // --- LS probe ---
@@ -559,7 +833,7 @@
   function probeDiscovery(ctx, discovery) {
     if (!discovery) return null
 
-    var found = findWorkingPort(ctx, discovery)
+    var found = discovery.endpoint || findWorkingPort(ctx, discovery)
     if (!found) return null
 
     ctx.host.log.info("using LS at " + found.scheme + "://127.0.0.1:" + found.port)
@@ -571,7 +845,13 @@
       locale: "en",
     }
 
-    // Try GetUserStatus first, fall back to GetCommandModelConfigs
+    var summaryData = null
+    try {
+      summaryData = callLs(ctx, found.port, found.scheme, discovery.csrf, "RetrieveUserQuotaSummary", { metadata: metadata }, { quietStatus: 404 })
+    } catch (e) {
+      ctx.host.log.warn("RetrieveUserQuotaSummary threw: " + String(e))
+    }
+
     var data = null
     try {
       data = callLs(ctx, found.port, found.scheme, discovery.csrf, "GetUserStatus", { metadata: metadata })
@@ -579,6 +859,9 @@
       ctx.host.log.warn("GetUserStatus threw: " + String(e))
     }
     var hasUserStatus = data && data.userStatus
+
+    var summaryLines = summaryGroups(summaryData) ? parseQuotaSummaries(ctx, [summaryData]) : null
+    if (summaryLines) return { plan: hasUserStatus ? readUserStatusPlan(data.userStatus) : null, lines: summaryLines }
 
     if (!hasUserStatus) {
       ctx.host.log.warn("GetUserStatus failed, trying GetCommandModelConfigs")
@@ -605,25 +888,17 @@
     var lines = buildModelLines(ctx, filtered)
     if (lines.length === 0) return null
 
-    var plan = null
-    if (hasUserStatus) {
-      // Prefer userTier.name (Google's own subscription system) over the legacy
-      // planInfo.planName field inherited from Windsurf/Codeium, which always
-      // returns "Pro" for all paid tiers including Google AI Ultra.
-      var ut = data.userStatus.userTier
-      var userTierName =
-        ut && typeof ut.name === "string" && ut.name.trim() ? ut.name.trim() : null
-      if (userTierName) {
-        plan = userTierName
-      } else {
-        var ps = data.userStatus.planStatus || {}
-        var pi = ps.planInfo || {}
-        plan =
-          typeof pi.planName === "string" && pi.planName.trim() ? pi.planName.trim() : null
-      }
-    }
+    return { plan: hasUserStatus ? readUserStatusPlan(data.userStatus) : null, lines: lines }
+  }
 
-    return { plan: plan, lines: lines }
+  function readUserStatusPlan(userStatus) {
+    // Prefer userTier.name (Google's own subscription system) over the legacy
+    // planInfo.planName field inherited from Windsurf/Codeium, which always
+    // returns "Pro" for all paid tiers including Google AI Ultra.
+    var ut = userStatus.userTier
+    if (ut && typeof ut.name === "string" && ut.name.trim()) return ut.name.trim()
+    var pi = (userStatus.planStatus || {}).planInfo || {}
+    return typeof pi.planName === "string" && pi.planName.trim() ? pi.planName.trim() : null
   }
 
   function probeLs(ctx) {
@@ -699,11 +974,7 @@
       }
     }
 
-    if (ccData && !ccData._authFailed) {
-      var configs = parseCloudCodeModels(ccData)
-      var lines = buildModelLines(ctx, configs)
-      if (lines.length > 0) return { plan: null, lines: lines }
-    }
+    if (ccData && !ccData._authFailed) return ccData
 
     throw LOGIN_MESSAGE
   }
