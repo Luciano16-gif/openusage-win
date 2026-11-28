@@ -17,6 +17,12 @@
   let lastUsageFetchMs = 0    // epoch ms of the most-recent API attempt
   let cachedUsageData = null  // last successful API response body (parsed JSON)
 
+  // Claude Code writes subscriptionType/rateLimitTier into the login once and never updates them,
+  // so an upgrade leaves the stored plan stale. The live plan comes from /api/oauth/profile instead.
+  const PROFILE_FETCH_INTERVAL_MS = 60 * 60 * 1000 // read the plan at most once an hour
+  let livePlan = null          // last plan read from the profile endpoint
+  let lastProfileFetchMs = 0   // epoch ms of the most-recent profile attempt
+
   function utf8DecodeBytes(bytes) {
     // Prefer native TextDecoder when available (QuickJS may not expose it).
     if (typeof TextDecoder !== "undefined") {
@@ -197,6 +203,7 @@
     return {
       baseApiUrl: baseApiUrl,
       usageUrl: baseApiUrl + "/api/oauth/usage",
+      profileUrl: baseApiUrl + "/api/oauth/profile",
       refreshUrl: refreshUrl,
       clientId: clientId,
       oauthFileSuffix: oauthFileSuffix,
@@ -466,10 +473,17 @@
   }
 
   function fetchUsage(ctx, accessToken) {
-    const oauthConfig = getOauthConfig(ctx)
+    return fetchOauthJson(ctx, getOauthConfig(ctx).usageUrl, accessToken)
+  }
+
+  function fetchProfile(ctx, accessToken) {
+    return fetchOauthJson(ctx, getOauthConfig(ctx).profileUrl, accessToken)
+  }
+
+  function fetchOauthJson(ctx, url, accessToken) {
     return ctx.util.request({
       method: "GET",
-      url: oauthConfig.usageUrl,
+      url: url,
       headers: {
         Authorization: "Bearer " + accessToken.trim(),
         Accept: "application/json",
@@ -479,6 +493,66 @@
       },
       timeoutMs: 10000,
     })
+  }
+
+  // Anthropic renamed Max 5x to Max and Max 20x to Ultra on Oct 30, 2026.
+  function formatPlan(ctx, type, tier) {
+    let raw = String(type || "").trim().toLowerCase()
+    if (raw.indexOf("claude_") === 0) raw = raw.slice("claude_".length)
+    const base = ctx.fmt.planLabel(raw)
+    if (!base) return null
+    const rateLimitTier = String(tier || "").toLowerCase()
+    if (base === "Ultra") return base
+    if (base === "Max") {
+      return rateLimitTier.indexOf("ultra") !== -1 || rateLimitTier.indexOf("20x") !== -1 ? "Ultra" : base
+    }
+    const tierMatch = rateLimitTier.match(/\d+x/)
+    return tierMatch ? base + " " + tierMatch[0] : base
+  }
+
+  // A failed lookup keeps the last known plan and is retried an hour later.
+  function readLivePlan(ctx, accessToken, nowMs) {
+    lastProfileFetchMs = nowMs
+    let resp
+    try {
+      resp = fetchProfile(ctx, accessToken)
+    } catch (e) {
+      ctx.host.log.warn("plan lookup failed; retrying in an hour: " + String(e))
+      return
+    }
+    if (!resp || resp.status < 200 || resp.status >= 300) {
+      ctx.host.log.warn("plan lookup failed (HTTP " + String(resp && resp.status) + "); retrying in an hour")
+      return
+    }
+    const profile = ctx.util.tryParseJson(resp.bodyText)
+    const organization = profile && profile.organization
+    const plan = organization
+      ? formatPlan(ctx, organization.organization_type, organization.rate_limit_tier)
+      : null
+    if (!plan) {
+      ctx.host.log.warn("plan lookup returned no organization plan; retrying in an hour")
+      return
+    }
+    livePlan = plan
+  }
+
+  // Anthropic moved per-model weekly windows off the top-level seven_day_<model> keys (now null)
+  // into the limits array as kind "weekly_scoped", named by scope.model.display_name.
+  function findScopedWeeklyLimit(limits, modelName) {
+    if (!Array.isArray(limits)) return null
+    for (let i = 0; i < limits.length; i++) {
+      const entry = limits[i]
+      const model = entry && entry.scope && entry.scope.model
+      if (
+        entry.kind === "weekly_scoped" &&
+        model &&
+        model.display_name === modelName &&
+        typeof entry.percent === "number"
+      ) {
+        return entry
+      }
+    }
+    return null
   }
 
   function parseRetryAfterSeconds(headers) {
@@ -819,7 +893,9 @@
             refresh: () => {
               ctx.host.log.info("usage returned 401, attempting refresh")
               didRefresh = true
-              return refreshToken(ctx, creds)
+              const refreshed = refreshToken(ctx, creds)
+              if (refreshed) accessToken = refreshed
+              return refreshed
             },
           })
         } catch (e) {
@@ -856,6 +932,9 @@
           }
           cachedUsageData = data
           rateLimitedUntilMs = 0
+          if (nowMs - lastProfileFetchMs >= PROFILE_FETCH_INTERVAL_MS) {
+            readLivePlan(ctx, accessToken, nowMs)
+          }
         }
         } // end fetch else-branch
       }
@@ -863,19 +942,7 @@
       ctx.host.log.info("skipping live usage fetch for inference-only token")
     }
 
-    let plan = null
-    if (creds.oauth.subscriptionType) {
-      const basePlan = ctx.fmt.planLabel(creds.oauth.subscriptionType)
-      if (basePlan) {
-        let tierSuffix = ""
-        const rlt = String(creds.oauth.rateLimitTier || "")
-        const tierMatch = rlt.match(/(\d+)x/)
-        if (tierMatch) {
-          tierSuffix = " " + tierMatch[1] + "x"
-        }
-        plan = basePlan + tierSuffix
-      }
-    }
+    const plan = livePlan || formatPlan(ctx, creds.oauth.subscriptionType, creds.oauth.rateLimitTier)
 
     if (data) {
       if (data.five_hour && typeof data.five_hour.utilization === "number") {
@@ -905,6 +972,17 @@
           limit: 100,
           format: { kind: "percent" },
           resetsAt: ctx.util.toIso(data.seven_day_sonnet.resets_at),
+          periodDurationMs: 7 * 24 * 60 * 60 * 1000 // 7 days
+        }))
+      }
+      const fable = findScopedWeeklyLimit(data.limits, "Fable")
+      if (fable) {
+        lines.push(ctx.line.progress({
+          label: "Fable",
+          used: fable.percent,
+          limit: 100,
+          format: { kind: "percent" },
+          resetsAt: ctx.util.toIso(fable.resets_at),
           periodDurationMs: 7 * 24 * 60 * 60 * 1000 // 7 days
         }))
       }
@@ -1011,6 +1089,8 @@
     rateLimitedUntilMs = 0
     lastUsageFetchMs = 0
     cachedUsageData = null
+    livePlan = null
+    lastProfileFetchMs = 0
   }
 
   globalThis.__openusage_plugin = { id: "claude", probe, _resetState }

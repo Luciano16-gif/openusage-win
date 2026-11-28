@@ -22,6 +22,10 @@ beforeEach(() => {
 
 const loadPlugin = async () => plugin
 
+// The hourly plan lookup also hits the network, so rate-limit tests count usage calls only.
+const usageCalls = (ctx) =>
+  ctx.host.http.request.mock.calls.filter((call) => String(call[0]?.url).includes("/api/oauth/usage")).length
+
 describe("claude plugin", () => {
   it("throws when no credentials", async () => {
     const ctx = makeCtx()
@@ -445,7 +449,7 @@ describe("claude plugin", () => {
     expect(result.lines.find((line) => line.label === "Weekly")).toBeTruthy()
   })
 
-  it("appends max rate limit tier to the plan label when present", async () => {
+  it("names stored Max tiers with Anthropic's current plan names", async () => {
     const runCase = async (rateLimitTier, expectedPlan) => {
       const ctx = makeCtx()
       ctx.host.fs.exists = () => true
@@ -469,8 +473,9 @@ describe("claude plugin", () => {
       expect(result.plan).toBe(expectedPlan)
     }
 
-    await runCase("claude_max_subscription_20x", "Max 20x")
-    await runCase("claude_max_subscription_5x", "Max 5x")
+    await runCase("claude_max_subscription_20x", "Ultra")
+    await runCase("claude_max_subscription_5x", "Max")
+    await runCase("default_claude_ultra", "Ultra")
   })
 
   it("omits resetsAt when resets_at is missing", async () => {
@@ -581,6 +586,177 @@ describe("claude plugin", () => {
     const result = plugin.probe(ctx)
     expect(result.lines.find((line) => line.label === "Sonnet")).toBeTruthy()
     expect(result.lines.find((line) => line.label === "Extra usage spent")).toBeTruthy()
+  })
+
+  describe("Fable weekly limit", () => {
+    const fableLimit = (overrides = {}) => ({
+      kind: "weekly_scoped",
+      group: "weekly",
+      percent: 5,
+      resets_at: "2099-01-01T06:59:59.947249+00:00",
+      scope: { model: { id: null, display_name: "Fable" }, surface: null },
+      ...overrides,
+    })
+
+    const probeWithLimits = async (limits) => {
+      const ctx = makeCtx()
+      ctx.host.fs.readText = () =>
+        JSON.stringify({ claudeAiOauth: { accessToken: "token", subscriptionType: "pro" } })
+      ctx.host.fs.exists = () => true
+      ctx.host.http.request.mockReturnValue({
+        status: 200,
+        bodyText: JSON.stringify({
+          seven_day: { utilization: 10, resets_at: "2099-01-01T06:59:59.947112+00:00" },
+          seven_day_sonnet: null,
+          seven_day_opus: null,
+          limits,
+        }),
+      })
+      const plugin = await loadPlugin()
+      return plugin.probe(ctx)
+    }
+
+    it("renders a Fable line from the weekly_scoped entry in limits", async () => {
+      const result = await probeWithLimits([
+        { kind: "session", group: "session", percent: 71, resets_at: "2099-01-01T00:00:00Z", scope: null },
+        { kind: "weekly_all", group: "weekly", percent: 10, resets_at: "2099-01-01T00:00:00Z", scope: null },
+        fableLimit(),
+      ])
+      const line = result.lines.find((l) => l.label === "Fable")
+      expect(line).toBeTruthy()
+      expect(line.used).toBe(5)
+      expect(line.limit).toBe(100)
+      expect(line.format).toEqual({ kind: "percent" })
+      expect(line.resetsAt).toBe("2099-01-01T06:59:59.947Z")
+      expect(line.periodDurationMs).toBe(7 * 24 * 60 * 60 * 1000)
+      expect(result.lines.find((l) => l.label === "Sonnet")).toBeUndefined()
+    })
+
+    it("ignores scoped limits for other models and entries without a numeric percent", async () => {
+      const result = await probeWithLimits([
+        fableLimit({ scope: { model: { display_name: "Sonnet" } } }),
+        fableLimit({ percent: "5" }),
+        fableLimit({ kind: "weekly_all" }),
+      ])
+      expect(result.lines.find((l) => l.label === "Fable")).toBeUndefined()
+    })
+
+    it("omits the Fable line when limits is missing", async () => {
+      const result = await probeWithLimits(undefined)
+      expect(result.lines.find((l) => l.label === "Fable")).toBeUndefined()
+      expect(result.lines.find((l) => l.label === "Weekly")).toBeTruthy()
+    })
+  })
+
+  describe("live plan from /api/oauth/profile", () => {
+    const usageBody = JSON.stringify({ five_hour: { utilization: 10, resets_at: "2099-01-01T00:00:00.000Z" } })
+
+    const makePlanCtx = (profileResponse, stored = { subscriptionType: "pro", rateLimitTier: "default_claude_ai" }) => {
+      const ctx = makeCtx()
+      ctx.host.fs.exists = () => true
+      ctx.host.fs.readText = () => JSON.stringify({ claudeAiOauth: { accessToken: "token", ...stored } })
+      ctx.host.http.request.mockImplementation((opts) => {
+        if (String(opts.url).endsWith("/api/oauth/profile")) {
+          if (typeof profileResponse === "function") return profileResponse()
+          return profileResponse
+        }
+        return { status: 200, bodyText: usageBody, headers: {} }
+      })
+      return ctx
+    }
+
+    const profile = (organization_type, rate_limit_tier) => ({
+      status: 200,
+      bodyText: JSON.stringify({ organization: { organization_type, rate_limit_tier } }),
+    })
+
+    const profileCalls = (ctx) =>
+      ctx.host.http.request.mock.calls.filter((call) => String(call[0]?.url).endsWith("/api/oauth/profile")).length
+
+    it("shows the live plan when the stored login still says Pro after an upgrade", async () => {
+      const ctx = makePlanCtx(profile("claude_max", "default_claude_max_5x"))
+      const plugin = await loadPlugin()
+      const result = plugin.probe(ctx)
+      expect(result.plan).toBe("Max")
+      const call = ctx.host.http.request.mock.calls.find((c) => String(c[0]?.url).endsWith("/api/oauth/profile"))
+      expect(call[0].url).toBe("https://api.anthropic.com/api/oauth/profile")
+      expect(call[0].headers.Authorization).toBe("Bearer token")
+    })
+
+    it("formats live plans with Anthropic's current names", async () => {
+      const cases = [
+        ["claude_max", "default_claude_max_5x", "Max"],
+        ["claude_max", "default_claude_max_20x", "Ultra"],
+        ["claude_max", null, "Max"],
+        ["claude_max", "default_claude_ultra", "Ultra"],
+        ["claude_ultra", "default_claude_max_20x", "Ultra"],
+        ["claude_pro", "default_claude_ai", "Pro"],
+        ["claude_team", "default_claude_max_5x", "Team 5x"],
+        ["claude_enterprise", null, "Enterprise"],
+      ]
+      const plugin = await loadPlugin()
+      for (const [type, tier, expected] of cases) {
+        plugin._resetState()
+        const result = plugin.probe(makePlanCtx(profile(type, tier)))
+        expect(result.plan, type + " / " + tier).toBe(expected)
+      }
+    })
+
+    it("keeps the stored plan and logs a warning when the profile lookup fails", async () => {
+      const plugin = await loadPlugin()
+      for (const response of [
+        { status: 500, bodyText: "" },
+        { status: 200, bodyText: "{}" },
+        () => {
+          throw new Error("network down")
+        },
+      ]) {
+        plugin._resetState()
+        const ctx = makePlanCtx(response)
+        const result = plugin.probe(ctx)
+        expect(result.plan).toBe("Pro")
+        expect(result.lines.find((l) => l.label === "Session")).toBeTruthy()
+        expect(ctx.host.log.warn).toHaveBeenCalledWith(expect.stringContaining("plan lookup"))
+      }
+    })
+
+    it("reads the plan at most once an hour and keeps it across later failures", async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date("2026-04-14T10:00:00.000Z"))
+      try {
+        let profileResponse = profile("claude_max", "default_claude_max_20x")
+        const ctx = makePlanCtx(() => profileResponse)
+        const plugin = await loadPlugin()
+
+        expect(plugin.probe(ctx).plan).toBe("Ultra")
+        expect(profileCalls(ctx)).toBe(1)
+
+        profileResponse = { status: 500, bodyText: "" }
+        vi.setSystemTime(new Date("2026-04-14T10:30:00.000Z"))
+        expect(plugin.probe(ctx).plan).toBe("Ultra")
+        expect(usageCalls(ctx)).toBe(2)
+        expect(profileCalls(ctx)).toBe(1)
+
+        vi.setSystemTime(new Date("2026-04-14T11:00:01.000Z"))
+        expect(plugin.probe(ctx).plan).toBe("Ultra")
+        expect(profileCalls(ctx)).toBe(2)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("skips the profile lookup when the usage request fails", async () => {
+      const ctx = makePlanCtx(profile("claude_max", "default_claude_max_5x"))
+      ctx.host.http.request.mockImplementation((opts) =>
+        String(opts.url).endsWith("/api/oauth/profile")
+          ? profile("claude_max", "default_claude_max_5x")
+          : { status: 429, bodyText: "", headers: {} }
+      )
+      const plugin = await loadPlugin()
+      const result = plugin.probe(ctx)
+      expect(result.plan).toBe("Pro")
+      expect(profileCalls(ctx)).toBe(0)
+    })
   })
 
   it("renders Claude Design line from seven_day_omelette with normalized resetsAt", async () => {
@@ -1927,12 +2103,12 @@ describe("claude plugin", () => {
 
         // First probe — gets 429, stores rateLimitedUntilMs
         plugin.probe(ctx)
-        expect(ctx.host.http.request).toHaveBeenCalledTimes(1)
+        expect(usageCalls(ctx)).toBe(1)
 
         // Second probe 60 s later — still within window, must NOT call API
         vi.setSystemTime(new Date("2026-04-14T10:01:00.000Z"))
         const result2 = plugin.probe(ctx)
-        expect(ctx.host.http.request).toHaveBeenCalledTimes(1) // no new request
+        expect(usageCalls(ctx)).toBe(1) // no new request
         const statusLine = result2.lines.find((l) => l.label === "Status")
         expect(statusLine).toBeTruthy()
         expect(statusLine.text).toMatch(/4m/) // ~4 minutes remaining
@@ -1956,12 +2132,12 @@ describe("claude plugin", () => {
 
         // First probe → 429
         plugin.probe(ctx)
-        expect(ctx.host.http.request).toHaveBeenCalledTimes(1)
+        expect(usageCalls(ctx)).toBe(1)
 
         // 90 s later — window expired, should attempt API again
         vi.setSystemTime(new Date("2026-04-14T10:01:30.000Z"))
         const result2 = plugin.probe(ctx)
-        expect(ctx.host.http.request).toHaveBeenCalledTimes(2)
+        expect(usageCalls(ctx)).toBe(2)
         // No rate-limited badge after success (amber color = rate-limited)
         expect(result2.lines.find((l) => l.label === "Status" && l.color === "#f59e0b")).toBeUndefined()
       } finally {
@@ -1981,17 +2157,17 @@ describe("claude plugin", () => {
 
         // First probe — succeeds
         plugin.probe(ctx)
-        expect(ctx.host.http.request).toHaveBeenCalledTimes(1)
+        expect(usageCalls(ctx)).toBe(1)
 
         // 30 s later — within MIN_USAGE_FETCH_INTERVAL_MS (5 min), no new request
         vi.setSystemTime(new Date("2026-04-14T10:00:30.000Z"))
         plugin.probe(ctx)
-        expect(ctx.host.http.request).toHaveBeenCalledTimes(1)
+        expect(usageCalls(ctx)).toBe(1)
 
         // 5+ minutes later — interval elapsed, should fetch again
         vi.setSystemTime(new Date("2026-04-14T10:05:01.000Z"))
         plugin.probe(ctx)
-        expect(ctx.host.http.request).toHaveBeenCalledTimes(2)
+        expect(usageCalls(ctx)).toBe(2)
       } finally {
         vi.useRealTimers()
       }
@@ -2039,17 +2215,17 @@ describe("claude plugin", () => {
         const plugin = await loadPlugin()
 
         plugin.probe(ctx)
-        expect(ctx.host.http.request).toHaveBeenCalledTimes(1)
+        expect(usageCalls(ctx)).toBe(1)
 
         // 4 min 59 s later — default 5 min backoff still active
         vi.setSystemTime(new Date("2026-04-14T10:04:59.000Z"))
         plugin.probe(ctx)
-        expect(ctx.host.http.request).toHaveBeenCalledTimes(1)
+        expect(usageCalls(ctx)).toBe(1)
 
         // 5 min 1 s later — backoff expired
         vi.setSystemTime(new Date("2026-04-14T10:05:01.000Z"))
         plugin.probe(ctx)
-        expect(ctx.host.http.request).toHaveBeenCalledTimes(2)
+        expect(usageCalls(ctx)).toBe(2)
       } finally {
         vi.useRealTimers()
       }
