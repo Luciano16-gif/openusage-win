@@ -40,10 +40,8 @@ Returns rate limit windows and optional extra credits.
     "utilization": 40,              // % used in 7-day window
     "resets_at": "2026-02-01T00:00:00Z"
   },
-  "seven_day_opus": {               // separate weekly Opus limit (optional, plan-dependent)
-    "utilization": 0,
-    "resets_at": "2026-02-01T00:00:00Z"
-  },
+  "seven_day_sonnet": null,         // legacy per-model weekly windows, now always null
+  "seven_day_opus": null,
   "seven_day_omelette": {           // separate weekly Claude Design limit (optional, plan-dependent)
     "utilization": 0,
     "resets_at": "2026-02-01T00:00:00Z"
@@ -53,11 +51,40 @@ Returns rate limit windows and optional extra credits.
     "used_credits": 500,            // cents spent
     "monthly_limit": 10000,         // cents cap (0 = unlimited)
     "currency": "USD"
-  }
+  },
+  "limits": [                       // every active limit, including per-model weekly ones
+    { "kind": "session", "percent": 25, "resets_at": "...", "scope": null },
+    { "kind": "weekly_all", "percent": 40, "resets_at": "...", "scope": null },
+    {
+      "kind": "weekly_scoped",      // separate weekly limit for one model
+      "percent": 5,
+      "resets_at": "2026-02-01T00:00:00Z",
+      "scope": { "model": { "display_name": "Fable" } }
+    }
+  ]
 }
 ```
 
 All windows are enforced simultaneously — hitting any limit throttles the user.
+
+Per-model weekly limits moved from the `seven_day_<model>` fields into `limits`. OpenUsage shows the `weekly_scoped` entry for Fable as the **Fable** line.
+
+### GET /api/oauth/profile
+
+Returns the account's current plan. Same headers as `/api/oauth/usage`.
+
+```jsonc
+{
+  "organization": {
+    "organization_type": "claude_max",       // claude_pro, claude_max, claude_team, claude_enterprise, ...
+    "rate_limit_tier": "default_claude_max_5x"
+  }
+}
+```
+
+Claude Code saves `subscriptionType` and `rateLimitTier` in its login once and never updates them, so after an upgrade they still show the old plan. OpenUsage reads the plan badge from this endpoint instead, at most once an hour and only after a successful usage request. If the lookup fails, it keeps the last plan it knew, falling back to the plan saved in the login.
+
+Plan names follow Anthropic's Oct 30, 2026 rename: Max 5x shows as **Max** and Max 20x as **Ultra**. Other plans keep a tier suffix when there is one (for example **Team 5x**).
 
 ## Authentication
 
